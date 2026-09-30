@@ -113,11 +113,12 @@ def cmd_ic_docs(args: argparse.Namespace) -> int:
     except ic.IcError as exc:
         return _ic_fail("ic docs", exc)
     for doc in docs:
-        print(
+        header = (
             f"== {doc.name}: stamp={doc.stamp} expected_stamp={doc.expected_stamp}"
             f" stamp_matches={str(doc.stamp_matches).lower()}"
         )
-        print(doc.content.rstrip("\n"))
+        print(ic.redact(header, token))
+        print(ic.redact(doc.content.rstrip("\n"), token))
         print()
     return 0
 

@@ -2,18 +2,21 @@
 
 The token comes from the ``IC_API_TOKEN`` environment variable at call time. It is never
 logged, never written to disk and never placed in an exception message: every error that
-leaves this module passes through :func:`redact` first.
+leaves this module passes through :func:`redact` first and carries no chained exception.
+Requests go straight to IC: environment and system proxies are ignored and redirects are
+refused, so the bearer token is only ever sent to the configured base URL.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import tempfile
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,13 +35,33 @@ CONTRACT_DOCS_PATH = "/api/v1/export/contract-docs"
 TIMEOUT_SECONDS = 15.0
 REDACTED = "ict_…<redacted>"
 # Belt and braces: anything shaped like an IC token is redacted even if it is not ours.
-_TOKEN_SHAPE = re.compile(r"ict_[A-Za-z0-9_\-]+")
+# The alphabet matches what read_token accepts: printable ASCII without whitespace.
+_TOKEN_SHAPE = re.compile(r"ict_[!-~]+")
+# scheme://host[:port][/path]; the path is printable ASCII, so no whitespace or control chars.
+_BASE_URL = re.compile(
+    r"https?://(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:/[!-~]*)?"
+)
 _DOC_KEYS = ("handoff_schema", "advisor_actions")
 _META_KEYS = ("generated_at", "schema_version", "advisor_actions_version")
 
 
 class IcError(Exception):
     """A failure talking to IC. The message is one line and already redacted."""
+
+
+def _clean_errors[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+    """Re-raise any ``IcError`` redacted and with no ``__context__`` or ``__cause__``."""
+
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return func(*args, **kwargs)
+        except IcError as exc:
+            message = redact(str(exc))
+        # Raised outside the handler, so the original exception is not reachable.
+        raise IcError(message) from None
+
+    return wrapper
 
 
 class _Token:
@@ -76,6 +99,7 @@ def redact(text: str, token: _Token | str | None = None) -> str:
     return _TOKEN_SHAPE.sub(REDACTED, text)
 
 
+@_clean_errors
 def read_token(environ: Mapping[str, str] | None = None) -> _Token:
     env = os.environ if environ is None else environ
     value = env.get(TOKEN_ENV, "").strip()
@@ -86,14 +110,19 @@ def read_token(environ: Mapping[str, str] | None = None) -> _Token:
     return _Token(value)
 
 
+@_clean_errors
 def load_base_url(config_path: Path = CONFIG_FILE, environ: Mapping[str, str] | None = None) -> str:
     """``HUB_IC_BASE_URL`` wins; otherwise ``ic.base_url`` from ``config.yaml``."""
     env = os.environ if environ is None else environ
     url = env.get(BASE_URL_ENV, "").strip()
     if not url:
         url = _base_url_from_config(config_path)
-    if not re.match(r"^https?://[^/\s]+", url):
-        raise IcError(f"IC base URL must start with http:// or https:// (got {url!r})")
+    if not _BASE_URL.fullmatch(url):
+        shown = redact(repr(url), env.get(TOKEN_ENV))
+        raise IcError(
+            f"IC base URL must start with http:// or https:// and be scheme://host[:port][/path]"
+            f" with no whitespace or control characters (got {shown})"
+        )
     return url.rstrip("/")
 
 
@@ -110,8 +139,8 @@ def _base_url_from_config(config_path: Path) -> str:
         data = yaml.safe_load(raw)
     except yaml.YAMLError:
         raise IcError(f"{config_path} is not valid YAML") from None
-    ic = data.get("ic") if isinstance(data, dict) else None
-    url = ic.get("base_url") if isinstance(ic, dict) else None
+    section = data.get("ic") if isinstance(data, dict) else None
+    url = section.get("base_url") if isinstance(section, dict) else None
     if not isinstance(url, str) or not url.strip():
         raise IcError(f"no IC base URL: set {BASE_URL_ENV} or ic.base_url in {config_path}")
     return url.strip()
@@ -123,9 +152,23 @@ def get_json(base_url: str, path: str, token: _Token, timeout: float | None = No
     try:
         return _get_json(base_url, path, token, timeout)
     except IcError as exc:
-        raise IcError(redact(str(exc), token)) from None
+        message = redact(str(exc), token)
     except Exception as exc:  # anything unforeseen still leaves as one redacted line
-        raise IcError(redact(f"IC request failed: {type(exc).__name__}: {exc}", token)) from None
+        message = redact(f"IC request failed: {type(exc).__name__}: {exc}", token)
+    # Raised outside the handlers so the unredacted original is not reachable via __context__.
+    raise IcError(message) from None
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the token must not travel to a ``Location`` we did not choose."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # urllib then raises HTTPError with the 3xx status
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    # ProxyHandler({}) disables env and system proxies: the call goes direct to IC.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirects())
 
 
 def _get_json(base_url: str, path: str, token: _Token, timeout: float) -> Any:
@@ -136,7 +179,7 @@ def _get_json(base_url: str, path: str, token: _Token, timeout: float) -> Any:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _build_opener().open(request, timeout=timeout) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
         raise IcError(_http_error_line(exc.code, path)) from None
@@ -161,6 +204,8 @@ def _timeout_line(base_url: str, timeout: float) -> str:
 
 
 def _http_error_line(code: int, path: str) -> str:
+    if 300 <= code < 400:
+        return f"IC redirected ({code}) — refusing to forward credentials"
     if code == 401:
         return f"IC rejected the token (401) for {path}: check {TOKEN_ENV} is current"
     if code == 403:
@@ -170,6 +215,7 @@ def _http_error_line(code: int, path: str) -> str:
     return f"IC returned HTTP {code} for {path}"
 
 
+@_clean_errors
 def fetch_context_pack(base_url: str, token: _Token, timeout: float | None = None) -> dict:
     pack = get_json(base_url, CONTEXT_PACK_PATH, token, timeout)
     if not isinstance(pack, dict):
@@ -180,6 +226,7 @@ def fetch_context_pack(base_url: str, token: _Token, timeout: float | None = Non
     return pack
 
 
+@_clean_errors
 def fetch_contract_docs(
     base_url: str, token: _Token, timeout: float | None = None
 ) -> list[ContractDoc]:
@@ -224,6 +271,7 @@ def write_json_atomic(path: Path, obj: Any) -> None:
         raise
 
 
+@_clean_errors
 def pull_pack(
     base_url: str,
     token: _Token,

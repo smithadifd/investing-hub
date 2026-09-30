@@ -63,7 +63,7 @@ SYNTHETIC_DOCS = {
 
 
 class FakeIc:
-    """A tiny IC stand-in: per-path status, body and delay; records request headers."""
+    """A tiny IC stand-in: per-path status, body, delay and headers; records requests."""
 
     def __init__(self):
         self.routes = {}
@@ -73,12 +73,16 @@ class FakeIc:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
                 fake.requests.append((self.path, dict(self.headers)))
-                status, body, delay = fake.routes.get(self.path, (404, b'{"detail":"nf"}', 0))
+                status, body, delay, extra = fake.routes.get(
+                    self.path, (404, b'{"detail":"nf"}', 0, {})
+                )
                 if delay:
                     time.sleep(delay)
                 try:
                     self.send_response(status)
                     self.send_header("Content-Type", "application/json")
+                    for name, value in extra.items():
+                        self.send_header(name, value)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
@@ -94,9 +98,9 @@ class FakeIc:
         self.thread = threading.Thread(target=self.server.serve_forever, args=(0.05,), daemon=True)
         self.thread.start()
 
-    def route(self, path, status=200, body=None, delay=0.0):
+    def route(self, path, status=200, body=None, delay=0.0, headers=None):
         raw = body if isinstance(body, bytes) else json.dumps(body).encode()
-        self.routes[path] = (status, raw, delay)
+        self.routes[path] = (status, raw, delay, headers or {})
 
     def close(self):
         self.server.shutdown()
@@ -108,6 +112,28 @@ def fake_ic():
     server = FakeIc()
     yield server
     server.close()
+
+
+@pytest.fixture
+def other_listener():
+    """A second local listener standing in for a redirect target or a proxy."""
+    server = FakeIc()
+    yield server
+    server.close()
+
+
+class FakeOpener:
+    """Stands in for the opener ``hub.ic`` builds; ``handler(request, timeout)`` answers."""
+
+    def __init__(self, handler):
+        self.handler = handler
+
+    def open(self, request, timeout=None):
+        return self.handler(request, timeout)
+
+
+def _use_opener(monkeypatch, handler):
+    monkeypatch.setattr(ic, "_build_opener", lambda: FakeOpener(handler))
 
 
 @pytest.fixture
@@ -215,28 +241,35 @@ def test_pull_timeout_prints_one_line(env, fake_ic, capsys, monkeypatch):
 
 
 def test_connect_timeout_prints_one_line(env, capsys, monkeypatch):
-    def slow_connect(request, timeout=None):
+    def slow_connect(request, timeout):
         raise urllib.error.URLError(TimeoutError("timed out"))
 
-    monkeypatch.setattr(urllib.request, "urlopen", slow_connect)
+    _use_opener(monkeypatch, slow_connect)
     assert main(["ic", "pull"]) == 1
     captured = capsys.readouterr()
     assert "(timeout)" in captured.err
     _assert_one_redacted_line(captured, env)
 
 
-def test_urlopen_gets_an_explicit_timeout(env, fake_ic, monkeypatch):
+def test_opener_gets_an_explicit_15s_timeout(env, fake_ic, monkeypatch):
     seen = {}
-    real = urllib.request.urlopen
+    real_build = ic._build_opener
 
-    def spy(request, timeout=None, **kwargs):
-        seen["timeout"] = timeout
-        return real(request, timeout=timeout, **kwargs)
+    def spy_build():
+        opener = real_build()
+        real_open = opener.open
 
-    monkeypatch.setattr(urllib.request, "urlopen", spy)
+        def spy_open(request, timeout=None, **kwargs):
+            seen["timeout"] = timeout
+            return real_open(request, timeout=timeout, **kwargs)
+
+        opener.open = spy_open
+        return opener
+
+    monkeypatch.setattr(ic, "_build_opener", spy_build)
     fake_ic.route(ic.CONTEXT_PACK_PATH, body=SYNTHETIC_PACK)
     assert main(["ic", "pull"]) == 0
-    assert seen["timeout"] == ic.TIMEOUT_SECONDS
+    assert seen["timeout"] == 15.0, f"timeout passed to the opener: {seen.get('timeout')}"
 
 
 def test_pull_connection_refused_prints_one_line(env, capsys, monkeypatch):
@@ -287,6 +320,14 @@ def test_token_with_control_characters_is_refused(env, fake_ic, capsys, monkeypa
     assert fake_ic.requests == []
 
 
+def test_token_with_printable_non_ascii_is_refused(env, fake_ic, capsys, monkeypatch):
+    monkeypatch.setenv(ic.TOKEN_ENV, "ict_synth\u00e9tic")
+    assert main(["ic", "pull"]) == 1
+    captured = capsys.readouterr()
+    assert "non-ASCII" in captured.err, captured.err
+    assert fake_ic.requests == [], "a non-ASCII token must never be sent"
+
+
 def test_missing_base_url_prints_one_line(env, capsys, monkeypatch):
     monkeypatch.delenv(ic.BASE_URL_ENV)
     assert main(["ic", "pull"]) == 1
@@ -316,26 +357,69 @@ def test_env_base_url_overrides_config(env, fake_ic):
 def test_unexpected_error_carrying_the_token_is_redacted(env, capsys, monkeypatch, token):
     monkeypatch.setenv(ic.TOKEN_ENV, token)
 
-    def boom(request, timeout=None):
+    def boom(request, timeout):
         raise RuntimeError(f"wire trace: {request.get_header('Authorization')}")
 
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    _use_opener(monkeypatch, boom)
     assert main(["ic", "pull"]) == 1
     captured = capsys.readouterr()
     assert ic.REDACTED in captured.err
     _assert_one_redacted_line(captured, env, token)
 
 
+def _assert_clean_error(err, secret):
+    assert secret not in str(err)
+    assert all(secret not in str(arg) for arg in err.args), err.args
+    assert err.__cause__ is None
+    assert err.__context__ is None, f"reachable original: {err.__context__!r}"
+    assert err.__suppress_context__ is True
+
+
 def test_error_from_get_json_is_redacted_and_unchained(monkeypatch):
-    def boom(request, timeout=None):
+    def boom(request, timeout):
         raise RuntimeError(f"echo {PLAIN_TOKEN}")
 
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    _use_opener(monkeypatch, boom)
     with pytest.raises(ic.IcError) as exc:
         ic.get_json("http://127.0.0.1:9", "/x", ic._Token(PLAIN_TOKEN))
-    assert PLAIN_TOKEN not in str(exc.value)
-    assert exc.value.__suppress_context__ is True
-    assert exc.value.__cause__ is None
+    _assert_clean_error(exc.value, PLAIN_TOKEN)
+
+
+def test_ic_error_from_the_request_is_redacted_and_unchained(monkeypatch):
+    def fail(base_url, path, token, timeout):
+        raise ic.IcError(f"echo {PLAIN_TOKEN}")
+
+    monkeypatch.setattr(ic, "_get_json", fail)
+    with pytest.raises(ic.IcError) as exc:
+        ic.get_json("http://127.0.0.1:9", "/x", ic._Token(PLAIN_TOKEN))
+    _assert_clean_error(exc.value, PLAIN_TOKEN)
+
+
+def test_bad_base_url_error_object_is_redacted_and_unchained():
+    environ = {ic.BASE_URL_ENV: f"ftp://example.invalid/{PLAIN_TOKEN}", ic.TOKEN_ENV: PLAIN_TOKEN}
+    with pytest.raises(ic.IcError) as exc:
+        ic.load_base_url(environ=environ)
+    _assert_clean_error(exc.value, PLAIN_TOKEN)
+
+
+def test_config_errors_leave_no_chained_exception(tmp_path):
+    with pytest.raises(ic.IcError) as exc:
+        ic.load_base_url(config_path=tmp_path / "absent.yaml", environ={})
+    _assert_clean_error(exc.value, PLAIN_TOKEN)
+    (tmp_path / "bad.yaml").write_text("ic: [unclosed\n")
+    with pytest.raises(ic.IcError) as exc:
+        ic.load_base_url(config_path=tmp_path / "bad.yaml", environ={})
+    _assert_clean_error(exc.value, PLAIN_TOKEN)
+
+
+def test_doc_missing_field_error_leaves_no_chained_exception(fake_ic):
+    body = json.loads(json.dumps(SYNTHETIC_DOCS))
+    del body["handoff_schema"]["content"]
+    fake_ic.route(ic.CONTRACT_DOCS_PATH, body=body)
+    with pytest.raises(ic.IcError) as exc:
+        ic.fetch_contract_docs(fake_ic.base_url, ic._Token(TOKEN))
+    assert "missing content" in str(exc.value)
+    _assert_clean_error(exc.value, TOKEN)
 
 
 def test_token_repr_and_str_are_redacted():
@@ -347,6 +431,56 @@ def test_token_repr_and_str_are_redacted():
 
 def test_redact_hides_token_shaped_strings():
     assert ic.redact("a ict_OTHER0value b") == f"a {ic.REDACTED} b"
+
+
+def test_redact_shape_covers_the_whole_token_alphabet():
+    # read_token accepts any printable ASCII without whitespace, so the shape layer must too.
+    assert ic.redact("a ict_ab+cd=ef.gh/ij b") == f"a {ic.REDACTED} b"
+
+
+def test_redact_exact_value_wins_for_a_token_with_symbols():
+    token = "ict_synth+value=with.sym/bols"
+    assert ic.redact(f"x {token} y", token) == f"x {ic.REDACTED} y"
+
+
+# --- transport: no redirects, no proxies ---------------------------------------------------
+
+
+def test_redirect_is_refused_and_the_token_never_follows(env, fake_ic, other_listener, capsys):
+    target = f"{other_listener.base_url}{ic.CONTEXT_PACK_PATH}"
+    other_listener.route(ic.CONTEXT_PACK_PATH, body=SYNTHETIC_PACK)
+    fake_ic.route(ic.CONTEXT_PACK_PATH, status=302, body={}, headers={"Location": target})
+    code = main(["ic", "pull"])
+    leaked = [h for _, h in other_listener.requests if "Authorization" in h]
+    assert leaked == [], "the redirect target received the Authorization header"
+    assert other_listener.requests == []
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "IC redirected (302) — refusing to forward credentials" in captured.err
+    _assert_one_redacted_line(captured, env)
+    assert not (env / "data").exists()
+
+
+@pytest.mark.parametrize("status", [301, 303, 307, 308])
+def test_every_redirect_status_is_refused(env, fake_ic, other_listener, capsys, status):
+    target = f"{other_listener.base_url}{ic.CONTRACT_DOCS_PATH}"
+    other_listener.route(ic.CONTRACT_DOCS_PATH, body=SYNTHETIC_DOCS)
+    fake_ic.route(ic.CONTRACT_DOCS_PATH, status=status, body={}, headers={"Location": target})
+    assert main(["ic", "docs"]) == 1
+    captured = capsys.readouterr()
+    assert f"IC redirected ({status})" in captured.err
+    assert other_listener.requests == []
+
+
+def test_env_proxy_is_bypassed(env, fake_ic, other_listener, monkeypatch):
+    for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(name, other_listener.base_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    fake_ic.route(ic.CONTEXT_PACK_PATH, body=SYNTHETIC_PACK)
+    assert main(["ic", "pull"]) == 0
+    assert other_listener.requests == [], "the proxy saw the request"
+    assert fake_ic.requests[-1][0] == ic.CONTEXT_PACK_PATH
 
 
 # --- hub ic docs ---------------------------------------------------------------------------
@@ -365,6 +499,18 @@ def test_docs_prints_both_docs_and_keeps_no_copy(env, fake_ic, capsys):
     path, headers = fake_ic.requests[-1]
     assert path == "/api/v1/export/contract-docs"
     assert headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_docs_content_echoing_the_token_is_redacted(env, fake_ic, capsys, monkeypatch):
+    monkeypatch.setenv(ic.TOKEN_ENV, PLAIN_TOKEN)
+    body = json.loads(json.dumps(SYNTHETIC_DOCS))
+    body["handoff_schema"]["content"] = f"# Echo\nAuthorization: Bearer {PLAIN_TOKEN}\n"
+    body["advisor_actions"]["filename"] = f"echo-{PLAIN_TOKEN}.md"
+    fake_ic.route(ic.CONTRACT_DOCS_PATH, body=body)
+    assert main(["ic", "docs"]) == 0
+    out = capsys.readouterr().out
+    assert PLAIN_TOKEN not in out, "doc output carried the token"
+    assert f"Authorization: Bearer {ic.REDACTED}" in out
 
 
 def test_docs_null_stamp_prints_none(env, fake_ic, capsys):
@@ -404,6 +550,35 @@ def test_fetch_contract_docs_is_reusable(fake_ic):
         ("handoff_schema", "1.7", True),
         ("advisor_actions", "1.3", False),
     ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8000\r\nX-Injected: 1",
+        "http://127.0.0.1:8000 trailing garbage",
+        "http://127.0.0.1:8000/path\twith-tab",
+        "http://127.0.0.1:80abc",
+        "http://127.0.0.1:8000\x07",
+        "http://",
+        "http:///no-host",
+    ],
+)
+def test_malformed_base_url_is_refused(env, fake_ic, capsys, monkeypatch, url):
+    monkeypatch.setenv(ic.BASE_URL_ENV, url)
+    assert main(["ic", "pull"]) == 1
+    captured = capsys.readouterr()
+    assert "must start with http://" in captured.err, captured.err
+    assert captured.err.count("\n") == 1, captured.err
+    assert fake_ic.requests == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://127.0.0.1:8000", "https://ic.example.invalid", "http://[::1]:8000/base/"],
+)
+def test_well_formed_base_url_is_accepted(url):
+    assert ic.load_base_url(environ={ic.BASE_URL_ENV: url}) == url.rstrip("/")
 
 
 def test_bad_base_url_error_is_redacted(env, capsys, monkeypatch):
