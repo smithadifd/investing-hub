@@ -97,8 +97,9 @@ model, such as off-book assets and account metadata.
 - **C. Handoff.** A session writes a block, the operator approves it, and the IC executor applies it
   and posts a receipt. The next pack shows the receipt, the hub marks the handoff applied, and
   proposes any document revisions that follow from it.
-- **D. Keeping docs current.** Receipts, imported trades, new digests and finished sessions produce
-  *proposed* revisions, which get accepted in a session. A stale document becomes a sweep finding.
+- **D. Keeping docs current (P1).** Receipts, imported trades, new digests and finished sessions
+  produce *proposed* revisions, which get accepted in a session. A stale document becomes a sweep
+  finding.
 - **E. Interests.** The hub notices shifts in what the operator cares about (from what gets
   discussed and which asks get a Yes or Skip) and writes `beats_proposals`. It never edits the
   beats file directly.
@@ -115,13 +116,18 @@ model, such as off-book assets and account metadata.
 - Session-open hook (flow A).
 - **Exit:** an interactive session does everything the old claude.ai project did, without Drive,
   and a **backup restore has been tested**. After the 2026-09-11 local-data loss, the restore test
-  is required.
+  is required. Document revisions written from sessions are P1 (flow D), so "everything the old
+  project did" in the P0 exit is read against that placement.
 
 ### P1 — Reconciliation sweep (one time)
 - Import custodian positions and transaction CSVs. PDF statements are the fallback, for example
   for a managed account.
 - Reconcile the documents against the custodians. Resolve known contradictions: household totals,
   undocumented pending assets, documented errors in the holdings and employer-equity docs.
+- Session document-revision write path: `hub doc revise` writing a revision with
+  `source_kind = session` through `store.insert_document_revision` (body from a file or stdin,
+  `source_ref` = the session handle), plus a read path `hub doc show <slug> [--revision N]` /
+  `hub doc list`.
 - Backfill IC's trade log through approval-gated `LOG_TRADE` handoffs. This is IC's top "walk" item.
 - Verify every carried level against bars and attach provenance.
 - Re-baseline IC's state: current deployment host, status of #262/#263/#265, open bugs.
