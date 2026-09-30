@@ -108,7 +108,8 @@ database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fa
 |---|---|
 | `IC_API_TOKEN` | Read-only IC token, resolved at call time from a credential manager; never stored in the repo |
 | `HUB_IC_BASE_URL` | Optional; overrides `ic.base_url` from `config.yaml` (see `config.example.yaml`) |
-| `MASSIVE_API_KEY` | Massive market-data key, read by the `massive` MCP server declared in `.mcp.json` via `${MASSIVE_API_KEY}` expansion; resolve it from `.env` at launch, never commit it |
+| `MASSIVE_API_KEY` | Massive market-data key, read by the `massive` MCP server declared in `.mcp.json` via `${MASSIVE_API_KEY}` expansion; resolve it from `.env.local` at launch, never commit it |
+| `OP_CONNECT_HOST` | 1Password Connect URL (`http://<connect-host>:8090`); required by `scripts/hub-session.sh`, which resolves `.env.local` and starts `claude` so `MASSIVE_API_KEY` and `IC_API_TOKEN` reach the session |
 
 `.mcp.json` is local-only (gitignored); copy it from `.mcp.json.example`.
 

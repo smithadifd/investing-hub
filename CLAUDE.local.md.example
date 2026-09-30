@@ -9,12 +9,13 @@
   Resolve it into the environment only for the command that needs it: put
   `IC_API_TOKEN="op://Automation/Investing Companion - Secrets/IC_API_TOKEN"` in a gitignored
   env-file such as `.env.local`, then run
-  `~/.claude/scripts/op-resolve.py --env-file .env.local -- hub ic pull`.
+  `OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- hub ic pull`.
   The hub reads only `IC_API_TOKEN`; it never calls the credential manager itself.
 - Market data key (Massive): `op://Automation/Investing Companion - Secrets/MASSIVE_API_KEY`
-  Copy `.env.example` to `.env` (gitignored) and start Claude Code through the resolver so the key
-  reaches the `massive` MCP server as `MASSIVE_API_KEY`; the resolver never prints the secret:
-  `~/.claude/scripts/op-resolve.py --env-file .env -- claude`
+  Copy `.env.example` to `.env.local` (gitignored), export `OP_CONNECT_HOST=http://<connect-host>:8090`,
+  and start Claude Code with `scripts/hub-session.sh` so the key reaches the `massive` MCP server as
+  `MASSIVE_API_KEY` and the IC token reaches the SessionStart hook; the resolver never prints secrets.
+  Equivalent: `OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- claude`
   One-time setup: `uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"`
   and `cp .mcp.json.example .mcp.json`
 
