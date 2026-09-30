@@ -39,6 +39,9 @@ hub db migrate             # apply pending migrations to an existing database
 hub db backup              # online backup into backups/, integrity-checked, keeps newest 7
 hub db restore-check [FILE]  # verify a backup (default: newest) against the live store; non-zero on FAIL
 hub import claude-export DIR [--apply]  # claude.ai export as revision-1 documents; dry run by default
+hub doc list [--titles]    # documents with latest revision, source and time; titles hidden unless asked
+hub doc show SLUG [--revision N]  # print one revision's body (default latest)
+hub doc revise SLUG --source-ref HANDLE [--body-file F] [--kind K] [--title T]  # append a session revision; body from F or stdin
 hub session-open           # print the session status block; always exits 0, read-only
 ```
 
@@ -49,6 +52,10 @@ them from the repo root. They exit 1 with one line on stderr on failure.
 contract docs), keys each document by its relative path, and only adds documents not yet
 stored, so re-running changes nothing; a file whose content changed is reported, never
 re-imported. Its default is a dry run that writes nothing. `hub ic pull` calls the live IC API.
+
+`hub doc list|show|revise` take `--db PATH`. `revise` appends a revision with `source_kind = session`
+and prints `<slug> revision N (session)`; creating a new slug needs `--kind`, and an empty body
+is refused. Unknown slugs or revisions and other failures exit 1 with one line on stderr.
 
 `hub session-open` (`--db PATH`, `--stale-days N`) prints one status block: pack age and
 versions, contract drift against IC's contract docs (or `contract: in sync`), pending briefs,

@@ -152,6 +152,27 @@ def list_documents(conn: sqlite3.Connection) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_document_revision(conn: sqlite3.Connection, slug: str, revision: int | None = None) -> dict:
+    """One revision of the document `slug` (the latest when `revision` is None).
+
+    Raises StoreError for an unknown slug or an unknown revision number.
+    """
+    doc = conn.execute("SELECT id, kind, title FROM documents WHERE slug = ?", (slug,)).fetchone()
+    if doc is None:
+        raise StoreError(f"unknown document: {slug}")
+    query = (
+        "SELECT revision, body, source_kind, source_ref, created_at AS revised_at"
+        " FROM document_revisions WHERE document_id = ?"
+    )
+    if revision is None:
+        row = conn.execute(query + " ORDER BY revision DESC LIMIT 1", (doc["id"],)).fetchone()
+    else:
+        row = conn.execute(query + " AND revision = ?", (doc["id"], revision)).fetchone()
+    if row is None:
+        raise StoreError(f"unknown revision {revision} of document: {slug}")
+    return {"slug": slug, "kind": doc["kind"], "title": doc["title"], **dict(row)}
+
+
 def integrity_check(path: Path) -> str:
     """Run `PRAGMA integrity_check` on the database file at `path`; return its verdict."""
     conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
