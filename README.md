@@ -27,6 +27,11 @@ hub --help
 | `hub ic pull` / `docs` | Read the Investing Companion context pack and contract docs |
 | `hub session-open` | Checks run when an advisor session opens |
 
+## Onboarding
+
+The [onboarding kit](docs/onboarding/README.md) is a fill-in-the-blanks scaffold for standing up your
+own advisor: an interview script, operating instructions and portfolio-state templates.
+
 ## Development
 
 ```bash
