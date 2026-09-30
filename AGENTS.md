@@ -2,7 +2,7 @@
 
 Canonical, tool-agnostic and self-contained. `CLAUDE.md` imports this file; don't duplicate it there.
 
-Backup posture: nightly `sqlite3 .backup` of `data/hub.db` into `backups/` with 7-day retention, plus the Time Machine layer that picks up `backups/`; GitHub holds only code, never data.
+Backup posture: nightly `hub db backup` (the online `sqlite3` `.backup` API, integrity-checked, newest 7 kept, so 7-day retention) of `data/hub.db` into `backups/`, plus the Time Machine layer that picks up `backups/`; GitHub holds only code, never data. The nightly schedule lives on the always-on Mac, outside this repo.
 
 ## What Investing Hub is
 
@@ -33,15 +33,23 @@ hub --help                 # list the command surface
 ruff check .               # lint
 ruff format --check .      # format check
 pytest                     # tests (synthetic data only)
+hub db init                # create data/hub.db and apply migrations (safe to re-run)
+hub db migrate             # apply pending migrations to an existing database
+hub db backup              # online backup into backups/, integrity-checked, keeps newest 7
 ```
 
-Every `hub` subcommand is currently a stub: it prints "not implemented" to stderr and exits 2.
-Once implemented, `hub ic pull` calls the live IC API and `hub db *` touch the local database.
+`hub db init|migrate|backup` take `--db PATH` (default `data/hub.db`) and `backup` takes
+`--backup-dir PATH` (default `backups/`); defaults are relative to the current directory, so run
+them from the repo root. They exit 1 with one line on stderr on failure. The other subcommands
+are still stubs: they print "not implemented" to stderr and exit 2. Once implemented,
+`hub ic pull` calls the live IC API.
 
 ## Repo map
 
 ```text
 hub/cli.py       argparse entry point; one function per subcommand
+hub/store.py     SQLite connection, migrations, document revisions, backups
+hub/migrations/  numbered SQL migrations (NNNN_name.sql), shipped as package data
 hub/__main__.py  python -m hub
 tests/           pytest suite
 ROADMAP.md       architecture and phases
@@ -58,8 +66,11 @@ See `ROADMAP.md` for the diagram. Do not bypass the handoff step.
 ## Database / storage
 
 Local SQLite at `data/hub.db`, schema defined by numbered SQL migrations applied in order and
-tracked in a `schema_version` table. Back up only with the online `.backup` API; a plain file
-copy can capture the database mid-write.
+tracked in a `schema_version` table. Connections use WAL mode with foreign keys on. Add a
+schema change as the next `hub/migrations/NNNN_name.sql`; never edit an applied migration.
+Back up only with `hub db backup` (the online `.backup` API); a plain file copy can capture the
+database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fails
+`PRAGMA integrity_check` is left as `.partial`, the command exits 1 and nothing is pruned.
 
 ## Conventions
 

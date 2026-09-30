@@ -1,8 +1,12 @@
-"""Command-line entry point. Every subcommand is currently a stub."""
+"""Command-line entry point. Commands not yet implemented are stubs that exit 2."""
 
 import argparse
+import sqlite3
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
+
+from hub import store
 
 NOT_IMPLEMENTED_EXIT = 2
 
@@ -12,17 +16,66 @@ def _not_implemented(name: str) -> int:
     return NOT_IMPLEMENTED_EXIT
 
 
+def _db_path_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=store.DEFAULT_DB_PATH,
+        help="database file (default: %(default)s, relative to the current directory)",
+    )
+
+
+def _backup_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=store.DEFAULT_BACKUP_DIR,
+        help="backup directory (default: %(default)s, relative to the current directory)",
+    )
+
+
+def _fail(name: str, exc: Exception) -> int:
+    print(f"hub {name}: {exc}", file=sys.stderr)
+    return 1
+
+
+def _apply_migrations(name: str, db: Path) -> int:
+    try:
+        conn = store.connect(db)
+        try:
+            applied = store.migrate(conn)
+        finally:
+            conn.close()
+    except (store.StoreError, sqlite3.Error) as exc:
+        return _fail(name, exc)
+    if applied:
+        print(f"{db}: applied {', '.join(applied)}")
+    else:
+        print(f"{db}: schema up to date")
+    return 0
+
+
 # One stub per function: replace a function's body to implement that command.
 def cmd_db_init(args: argparse.Namespace) -> int:
-    return _not_implemented("db init")
+    return _apply_migrations("db init", args.db)
 
 
 def cmd_db_migrate(args: argparse.Namespace) -> int:
-    return _not_implemented("db migrate")
+    if not args.db.is_file():
+        return _fail("db migrate", f"database not found: {args.db} (run `hub db init`)")
+    return _apply_migrations("db migrate", args.db)
 
 
 def cmd_db_backup(args: argparse.Namespace) -> int:
-    return _not_implemented("db backup")
+    try:
+        result = store.backup(args.db, args.backup_dir)
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail("db backup", exc)
+    print(f"backup written: {result.path} (integrity_check ok)")
+    for path in result.pruned:
+        print(f"pruned: {path}")
+    return 0
 
 
 def cmd_db_restore_check(args: argparse.Namespace) -> int:
@@ -69,6 +122,14 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
 }
 
 
+# Full command name -> function adding that command's arguments to its parser.
+ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
+    "db init": _db_path_arg,
+    "db migrate": _db_path_arg,
+    "db backup": _backup_args,
+}
+
+
 def _command_listing() -> str:
     lines = ["full command surface:"]
     for group, subs in COMMANDS.items():
@@ -89,13 +150,19 @@ def build_parser() -> argparse.ArgumentParser:
     for group, subs in COMMANDS.items():
         if group is None:
             for name, (help_text, handler) in subs.items():
-                top.add_parser(name, help=help_text).set_defaults(handler=handler)
+                sub = top.add_parser(name, help=help_text)
+                sub.set_defaults(handler=handler)
+                if name in ARGUMENTS:
+                    ARGUMENTS[name](sub)
             continue
         group_parser = top.add_parser(group, help=f"{group} commands")
         group_subs = group_parser.add_subparsers(dest="subcommand", metavar="<subcommand>")
         group_subs.required = True
         for name, (help_text, handler) in subs.items():
-            group_subs.add_parser(name, help=help_text).set_defaults(handler=handler)
+            sub = group_subs.add_parser(name, help=help_text)
+            sub.set_defaults(handler=handler)
+            if f"{group} {name}" in ARGUMENTS:
+                ARGUMENTS[f"{group} {name}"](sub)
     return parser
 
 
