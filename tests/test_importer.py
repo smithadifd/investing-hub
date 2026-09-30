@@ -106,3 +106,79 @@ def test_missing_dir_exits_1_with_one_line(db, tmp_path, capsys):
     assert captured.out == ""
     assert len(captured.err.strip().splitlines()) == 1
     assert not db.exists()
+
+
+def _export(tmp_path):
+    src = tmp_path / "export"
+    (src / "knowledge").mkdir(parents=True)
+    (src / "memory.md").write_text("Placeholder memory text.\n", encoding="utf-8")
+    return src
+
+
+@pytest.mark.parametrize("where", ["link.md", "knowledge/link.md"])
+def test_symlink_outside_the_export_is_skipped(db, tmp_path, capsys, where):
+    src = _export(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE-BODY-MARKER\n", encoding="utf-8")
+    (src / where).symlink_to(outside)
+    assert _run(db, "--apply", src=src) == 0
+    captured = capsys.readouterr()
+    assert f"skipped: {where} (symlink resolves outside the export directory)" in captured.out
+    assert "OUTSIDE-BODY-MARKER" not in captured.out + captured.err
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM document_revisions WHERE body LIKE '%OUTSIDE-BODY-MARKER%'"
+        ).fetchone() == (0,)
+    finally:
+        conn.close()
+    assert [r[3] for r in _rows(db)] == ["memory.md"]
+
+
+def test_symlink_inside_the_export_is_still_read(db, tmp_path):
+    src = _export(tmp_path)
+    (src / "alias.md").symlink_to(src / "memory.md")
+    assert _run(db, "--apply", src=src) == 0
+    assert {r[3] for r in _rows(db)} == {"memory.md", "alias.md"}
+
+
+def test_nested_knowledge_entries_are_reported_as_skipped(db, tmp_path, capsys):
+    src = _export(tmp_path)
+    (src / "knowledge" / "sub").mkdir()
+    (src / "knowledge" / "sub" / "x.md").write_text("Placeholder nested.\n", encoding="utf-8")
+    (src / "knowledge" / "data.txt").write_text("Placeholder text.\n", encoding="utf-8")
+    (src / "knowledge" / "dir.md").mkdir()
+    assert _run(db, "--apply", src=src) == 0
+    out = capsys.readouterr().out
+    assert "skipped: knowledge/sub (not a top-level .md file in knowledge/)" in out
+    assert "skipped: knowledge/data.txt (not a top-level .md file in knowledge/)" in out
+    assert "skipped: knowledge/dir.md (not a top-level .md file in knowledge/)" in out
+    assert [r[3] for r in _rows(db)] == ["memory.md"]
+
+
+def test_directory_named_like_a_document_is_ignored(db, tmp_path):
+    src = _export(tmp_path)
+    (src / "x.md").mkdir()
+    assert _run(db, "--apply", src=src) == 0
+    assert [r[3] for r in _rows(db)] == ["memory.md"]
+
+
+def test_dry_run_refuses_a_directory_as_db_like_apply(tmp_path, capsys):
+    src = _export(tmp_path)
+    bad = tmp_path / "dbdir"
+    bad.mkdir()
+    assert _run(bad, src=src) == 1
+    captured = capsys.readouterr()
+    assert "would add" not in captured.out
+    assert len(captured.err.strip().splitlines()) == 1
+    assert _run(bad, "--apply", src=src) == 1
+
+
+def test_dry_run_reads_a_db_path_with_uri_characters(tmp_path, capsys):
+    src = _export(tmp_path)
+    odd = tmp_path / "a b#c?d" / "hub.db"
+    assert _run(odd, "--apply", src=src) == 0
+    capsys.readouterr()
+    assert _run(odd, src=src) == 0
+    out = capsys.readouterr().out
+    assert "unchanged: memory.md (memory)" in out

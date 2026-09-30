@@ -44,18 +44,30 @@ def slug_for(source_ref: str) -> str:
     return source_ref.removesuffix(".md")
 
 
-def scan(root: Path) -> tuple[list[Candidate], list[str]]:
-    """Return the files to import and the skipped relative paths, both in path order."""
+def scan(root: Path) -> tuple[list[Candidate], list[tuple[str, str]]]:
+    """Return the files to import and the skipped (relative path, reason) pairs, in path order."""
     if not root.is_dir():
         raise ImportError_(f"not a directory: {root}")
+    real_root = root.resolve()
     files = sorted(p for p in root.glob("*.md") if p.is_file())
-    files += sorted(p for p in (root / "knowledge").glob("*.md") if p.is_file())
+    skipped: list[tuple[str, str]] = []
+    knowledge = root / "knowledge"
+    if knowledge.is_dir():
+        for entry in sorted(knowledge.iterdir()):
+            if entry.suffix == ".md" and entry.is_file():
+                files.append(entry)
+            else:
+                skipped.append(
+                    (entry.relative_to(root).as_posix(), "not a top-level .md file in knowledge/")
+                )
     found: list[Candidate] = []
-    skipped: list[str] = []
     for path in files:
         ref = path.relative_to(root).as_posix()
         if ref in SKIPPED:
-            skipped.append(ref)
+            skipped.append((ref, "served by Investing Companion"))
+            continue
+        if not path.resolve().is_relative_to(real_root):
+            skipped.append((ref, "symlink resolves outside the export directory"))
             continue
         try:
             body = path.read_text(encoding="utf-8")

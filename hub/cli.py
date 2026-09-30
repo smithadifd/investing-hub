@@ -131,8 +131,8 @@ def cmd_import_claude_export(args: argparse.Namespace) -> int:
     for state, cand in planned:
         label = verb.get(state, "changed, left as is")
         print(f"{label}: {cand.source_ref} ({cand.kind})")
-    for ref in skipped:
-        print(f"skipped: {ref} (served by Investing Companion)")
+    for ref, reason in skipped:
+        print(f"skipped: {ref} ({reason})")
     if args.apply:
         print(f"{args.db}: {written} document(s) written")
     else:
@@ -142,9 +142,11 @@ def cmd_import_claude_export(args: argparse.Namespace) -> int:
 
 def _dry_run_plan(db: Path, candidates):
     """Plan against an existing database read-only; a missing one counts as empty."""
+    if db.is_dir():
+        raise OSError(f"database path is a directory: {db}")
     if not db.is_file():
         return importer.plan(None, candidates)
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         try:
