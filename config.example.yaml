@@ -1,0 +1,4 @@
+# Copy to config.yaml (gitignored) and set the values for this machine.
+ic:
+  # Investing Companion API on the LAN. HUB_IC_BASE_URL overrides this.
+  base_url: http://<ic-host>:8000
