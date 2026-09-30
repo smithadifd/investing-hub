@@ -1,12 +1,13 @@
 """Command-line entry point. Commands not yet implemented are stubs that exit 2."""
 
 import argparse
+import os
 import sqlite3
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from hub import store
+from hub import ic, store
 
 NOT_IMPLEMENTED_EXIT = 2
 
@@ -86,12 +87,40 @@ def cmd_import_claude_export(args: argparse.Namespace) -> int:
     return _not_implemented("import claude-export")
 
 
+def _ic_fail(name: str, exc: ic.IcError) -> int:
+    print(f"hub {name}: {ic.redact(str(exc), os.environ.get(ic.TOKEN_ENV))}", file=sys.stderr)
+    return 1
+
+
 def cmd_ic_pull(args: argparse.Namespace) -> int:
-    return _not_implemented("ic pull")
+    try:
+        token = ic.read_token()
+        meta = ic.pull_pack(ic.load_base_url(), token)
+    except ic.IcError as exc:
+        return _ic_fail("ic pull", exc)
+    print(
+        f"hub ic pull: stored {ic.PACK_DIR / ic.PACK_FILE}"
+        f" (schema {meta['schema_version']}, advisor-actions {meta['advisor_actions_version']},"
+        f" generated {meta['generated_at']}, fetched {meta['fetched_at']})"
+    )
+    return 0
 
 
 def cmd_ic_docs(args: argparse.Namespace) -> int:
-    return _not_implemented("ic docs")
+    try:
+        token = ic.read_token()
+        docs = ic.fetch_contract_docs(ic.load_base_url(), token)
+    except ic.IcError as exc:
+        return _ic_fail("ic docs", exc)
+    for doc in docs:
+        header = (
+            f"== {doc.name}: stamp={doc.stamp} expected_stamp={doc.expected_stamp}"
+            f" stamp_matches={str(doc.stamp_matches).lower()}"
+        )
+        print(ic.redact(header, token))
+        print(ic.redact(doc.content.rstrip("\n"), token))
+        print()
+    return 0
 
 
 def cmd_session_open(args: argparse.Namespace) -> int:

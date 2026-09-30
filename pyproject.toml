@@ -9,7 +9,7 @@ description = "Advisor and attention layer that pairs with Investing Companion."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest"]

@@ -20,7 +20,7 @@ handoff blocks, and never commits personal data.
 | Language | Python 3.12 |
 | CLI | `argparse`, one `hub` entry point |
 | Store | stdlib `sqlite3`, numbered SQL migrations, no ORM |
-| Dependencies | none at runtime |
+| Dependencies | `PyYAML` (reads `config.yaml`); HTTP uses stdlib `urllib` |
 | Lint / format | `ruff` |
 | Tests | `pytest` |
 | CI | GitHub Actions, `ubuntu-latest` |
@@ -74,7 +74,7 @@ database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fa
 
 ## Conventions
 
-- Zero runtime dependencies; stdlib first.
+- Stdlib first; `PyYAML` is the only runtime dependency.
 - Every subcommand is its own function so it can be replaced independently.
 - Tests use synthetic data only.
 - Line length 100, `ruff` defaults plus import sorting.
@@ -92,6 +92,7 @@ database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fa
 | Variable | Purpose |
 |---|---|
 | `IC_API_TOKEN` | Read-only IC token, resolved at call time from a credential manager; never stored in the repo |
+| `HUB_IC_BASE_URL` | Optional; overrides `ic.base_url` from `config.yaml` (see `config.example.yaml`) |
 | `MASSIVE_API_KEY` | Massive market-data key, read by the `massive` MCP server declared in `.mcp.json` via `${MASSIVE_API_KEY}` expansion; resolve it from `.env` at launch, never commit it |
 
 `.mcp.json` is local-only (gitignored); copy it from `.mcp.json.example`.
