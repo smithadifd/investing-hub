@@ -292,3 +292,130 @@ def test_live_wal_content_is_seen(env, capsys):
     finally:
         writer.close()
     assert "Live WAL brief" in out
+
+
+def _doc_revised(root, created_at, slug="edge-doc"):
+    conn = store.connect(root / "data" / "hub.db")
+    store.insert_document_revision(
+        conn, slug=slug, kind="thesis", body="b", source_kind="import", source_ref="r"
+    )
+    conn.execute("UPDATE document_revisions SET created_at = ?", (created_at,))
+    conn.close()
+
+
+def _block(root, now, stale_days=None):
+    return session_open.build_block(
+        root / "data" / "hub.db",
+        stale_days,
+        now=now,
+        pack_dir=root / "data" / "ic",
+        config_path=root / "config.yaml",
+    )
+
+
+NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def test_wal_without_shm_writes_nothing_next_to_the_database(env, capsys, tmp_path):
+    writer = store.connect(env / "data" / "hub.db")  # stays open while the files are copied
+    writer.execute("INSERT INTO briefs (body) VALUES ('Crash leftover brief')")
+    crashed = tmp_path / "crashed"
+    crashed.mkdir()
+    try:
+        for name in ("hub.db", "hub.db-wal"):
+            (crashed / name).write_bytes((env / "data" / name).read_bytes())
+    finally:
+        writer.close()
+    assert sorted(p.name for p in crashed.iterdir()) == ["hub.db", "hub.db-wal"]
+    before = _tree(crashed)
+    out = _run(capsys, "--db", str(crashed / "hub.db"))
+    assert sorted(p.name for p in crashed.iterdir()) == ["hub.db", "hub.db-wal"]
+    assert _tree(crashed) == before
+    assert "Crash leftover brief" in out
+
+
+def test_undecodable_config_is_one_warning_and_the_block_still_prints(env, capsys):
+    (env / "config.yaml").write_bytes(b"\xff\xfe\x00bad")
+    out = _run(capsys)
+    warns = [ln for ln in out.splitlines() if ln.startswith("WARN config:")]
+    assert len(warns) == 1 and "cannot be decoded" in warns[0]
+    assert "pack: fetched" in out and "contract: in sync" in out
+    assert "pending briefs: 0" in out and "documents older than 30d: 0" in out
+
+
+def test_final_redaction_removes_a_token_carried_by_the_pack_metadata(env, capsys):
+    meta_path = env / "data" / "ic" / "pack-meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["generated_at"] = f"leak-{TOKEN}"  # printed raw by the pack section
+    meta_path.write_text(json.dumps(meta))
+    out = _run(capsys)  # _run asserts the token is absent
+    assert f"generated leak-{ic.REDACTED}" in out
+
+
+def test_document_exactly_at_the_threshold_is_not_stale(env):
+    _doc_revised(env, (NOW - timedelta(days=30)).isoformat())
+    assert "documents older than 30d: 0" in _block(env, NOW)
+
+
+def test_document_a_second_past_the_threshold_is_stale(env):
+    _doc_revised(env, (NOW - timedelta(days=30, seconds=1)).isoformat())
+    assert "documents older than 30d: 1" in _block(env, NOW)
+
+
+def test_fractional_day_past_the_threshold_is_stale(env):
+    _doc_revised(env, (NOW - timedelta(days=30, hours=23)).isoformat())
+    block = _block(env, NOW)
+    assert "documents older than 30d: 1" in block and "edge-doc" in block
+
+
+def test_negative_configured_stale_days_is_refused_with_a_warning(env):
+    (env / "config.yaml").write_text("session_open:\n  stale_days: -1\n")
+    block = _block(env, NOW)
+    assert "WARN config:" in block and "documents older than 30d" in block
+
+
+def test_negative_stale_days_flag_is_refused(env, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["session-open", "--stale-days", "-1"])
+    assert exc.value.code == 2
+    assert "non-negative" in capsys.readouterr().err
+
+
+def test_naive_timestamps_are_read_as_utc(env):
+    _doc_revised(env, "2026-01-01 00:00:00")
+    block = _block(env, NOW)
+    assert "documents older than 30d: 1" in block and "edge-doc" in block
+    assert "WARN documents" not in block
+
+
+def test_pack_age_over_a_day_shows_days_and_hours(env):
+    meta_path = env / "data" / "ic" / "pack-meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["fetched_at"] = (NOW - timedelta(days=2, hours=3, minutes=7)).isoformat()
+    meta_path.write_text(json.dumps(meta))
+    assert "age 2d 3h)" in _block(env, NOW)
+
+
+def test_only_pending_briefs_are_listed(env, capsys):
+    for status in ("pending", "accepted", "consumed"):
+        _sql(
+            env,
+            "INSERT INTO briefs (body, status) VALUES (?, ?)",
+            (f"Brief is {status}", status),
+        )
+    out = _run(capsys)
+    assert "pending briefs: 1" in out
+    assert "Brief is pending" in out
+    assert "Brief is accepted" not in out and "Brief is consumed" not in out
+
+
+def test_the_ic_fetch_uses_a_five_second_timeout(env, capsys, monkeypatch):
+    seen = []
+
+    def record(base, token, timeout=None):
+        seen.append(timeout)
+        return _docs()
+
+    monkeypatch.setattr(ic, "fetch_contract_docs", record)
+    _run(capsys)
+    assert seen == [5.0]

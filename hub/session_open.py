@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
-from collections.abc import Callable
-from datetime import UTC, datetime
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -24,6 +27,7 @@ CONFIG_STALE_KEY = "stale_days"
 # schema doc is stamped with schema_version, the advisor-actions doc with its own version).
 DOC_VERSION_KEY = {"handoff_schema": "schema_version", "advisor_actions": "advisor_actions_version"}
 _TITLE_WIDTH = 72
+FETCH_TIMEOUT_SECONDS = 5.0  # a hung IC must not hold a session open
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -58,8 +62,13 @@ def resolve_stale_days(flag: int | None, config_path: Path = ic.CONFIG_FILE) -> 
         return flag, ""
     try:
         data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except OSError:
         return DEFAULT_STALE_DAYS, ""
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return DEFAULT_STALE_DAYS, (
+            f"{config_path} cannot be decoded; ignoring {CONFIG_SECTION}.{CONFIG_STALE_KEY}"
+            f" and using {DEFAULT_STALE_DAYS}"
+        )
     section = data.get(CONFIG_SECTION) if isinstance(data, dict) else None
     if not isinstance(section, dict) or CONFIG_STALE_KEY not in section:
         return DEFAULT_STALE_DAYS, ""
@@ -72,19 +81,31 @@ def resolve_stale_days(flag: int | None, config_path: Path = ic.CONFIG_FILE) -> 
     )
 
 
-def _open_readonly(db: Path) -> sqlite3.Connection:
-    """Open without creating or changing any file.
+@contextmanager
+def _open_readonly(db: Path) -> Iterator[sqlite3.Connection]:
+    """Open without creating or changing any file next to the database.
 
-    A WAL database opened even read-only creates ``-wal`` and ``-shm`` files. When neither
+    A WAL database opened even read-only creates ``-wal`` and ``-shm`` files. When no ``-wal``
     exists (the usual case after a clean close) there is no WAL content to miss, so the file
-    is opened ``immutable`` and nothing is created; when a WAL is present (a writer is live)
-    it is opened ``mode=ro`` so its content is seen.
+    is opened ``immutable`` in place. When one exists (a writer is live, or it crashed) the
+    database and its WAL are copied into a private temporary directory and read there, so
+    whatever SQLite creates lands in the copy and is removed with it.
     """
     wal = db.with_name(db.name + "-wal")
-    mode = "mode=ro" if wal.exists() else "immutable=1"
-    conn = sqlite3.connect(f"file:{db}?{mode}", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    with tempfile.TemporaryDirectory(prefix="hub-session-open-") as scratch:
+        if wal.exists():
+            copy = Path(scratch) / db.name
+            shutil.copyfile(wal, copy.with_name(wal.name))
+            shutil.copyfile(db, copy)
+            target = f"file:{copy}?mode=ro"
+        else:
+            target = f"file:{db}?immutable=1"
+        conn = sqlite3.connect(target, uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
 
 
 def _pack_section(meta_path: Path, now: datetime) -> tuple[list[str], dict | None]:
@@ -111,7 +132,7 @@ def _drift_section(meta: dict | None) -> list[str]:
     token = None
     try:
         token = ic.read_token()
-        docs = ic.fetch_contract_docs(ic.load_base_url(), token)
+        docs = ic.fetch_contract_docs(ic.load_base_url(), token, timeout=FETCH_TIMEOUT_SECONDS)
     except ic.IcError as exc:
         return [f"WARN contract: cannot check drift: {ic.redact(str(exc), token)}"]
     problems = []
@@ -156,7 +177,7 @@ def _stale_section(conn: sqlite3.Connection, now: datetime, stale_days: int) -> 
     stale = []
     for doc in store.list_documents(conn):
         revised = _parse_time(doc["revised_at"])
-        if revised is not None and (now - revised).days > stale_days:
+        if revised is not None and now - revised > timedelta(days=stale_days):
             stale.append(
                 f"{doc['slug']} r{doc['revision']} revised {doc['revised_at']}"
                 f" ({(now - revised).days}d ago)"
@@ -196,14 +217,10 @@ def build_block(
         lines.append(f"WARN store: database not found at {db} (run `hub db init`)")
     else:
         try:
-            conn = _open_readonly(db)
-        except sqlite3.Error as exc:
-            lines.append(f"WARN store: cannot open {db}: {exc}")
-        else:
-            try:
+            with _open_readonly(db) as conn:
                 lines += _store_sections(conn, now, days)
-            finally:
-                conn.close()
+        except (sqlite3.Error, OSError) as exc:
+            lines.append(f"WARN store: cannot open {db}: {exc}")
 
     # Last line of defence: nothing token-shaped or equal to the live token leaves this block.
     return ic.redact("\n".join(lines), os.environ.get(ic.TOKEN_ENV, "").strip() or None)

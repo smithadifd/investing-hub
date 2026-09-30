@@ -185,11 +185,21 @@ def cmd_ic_docs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _non_negative_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return value
+
+
 def _session_open_args(parser: argparse.ArgumentParser) -> None:
     _db_path_arg(parser)
     parser.add_argument(
         "--stale-days",
-        type=int,
+        type=_non_negative_int,
         default=None,
         metavar="N",
         help="list documents whose latest revision is older than N days"
