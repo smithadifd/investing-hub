@@ -1,0 +1,12 @@
+# Personal data never enters this public repo
+import/
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+CLAUDE.local.md
+.env
+.env.*
+!.env.example
+.DS_Store
