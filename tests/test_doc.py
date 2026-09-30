@@ -72,6 +72,31 @@ def test_list_show_round_trip(db, capsys):
     assert "Alpha Title" in titled
 
 
+def test_list_empty_store_prints_header_only(db, capsys):
+    capsys.readouterr()
+    assert main(["doc", "list", "--db", str(db)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert lines[0].split() == [
+        "slug",
+        "kind",
+        "revision",
+        "source_kind",
+        "revised_at",
+    ]
+    assert main(["doc", "list", "--titles", "--db", str(db)]) == 0
+    titled_lines = capsys.readouterr().out.splitlines()
+    assert len(titled_lines) == 1
+    assert titled_lines[0].split() == [
+        "slug",
+        "kind",
+        "revision",
+        "source_kind",
+        "revised_at",
+        "title",
+    ]
+
+
 def test_show_latest_vs_revision(db, capsys):
     _seed(db)
     capsys.readouterr()

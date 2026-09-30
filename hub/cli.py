@@ -279,7 +279,7 @@ def cmd_doc_list(args: argparse.Namespace) -> int:
     if args.titles:
         headers.append("title")
     rows = [[str(d["title"] or "") if h == "title" else str(d[h]) for h in headers] for d in docs]
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    widths = [max([len(h), *(len(r[i]) for r in rows)]) for i, h in enumerate(headers)]
     for line in [headers, *rows]:
         print("  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip())
     return 0
