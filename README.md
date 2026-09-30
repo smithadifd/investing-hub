@@ -45,6 +45,22 @@ pytest
 Copy `CLAUDE.local.md.example` to `CLAUDE.local.md` and fill in your persona, credential
 references and IC base URL. That file is gitignored.
 
+### Massive market-data MCP server
+
+One-time setup:
+
+```bash
+uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"
+cp .mcp.json.example .mcp.json   # local-only, gitignored
+cp .env.example .env             # holds a 1Password reference, not the key
+```
+
+Start Claude Code with the key resolved into its environment (the resolver never prints it):
+
+```bash
+~/.claude/scripts/op-resolve.py --env-file .env -- claude
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
