@@ -43,7 +43,7 @@ def test_no_command_prints_help_and_exits_0(capsys):
 
 
 def test_stub_exits_2_with_message(capsys):
-    assert main(["ic", "docs"]) == 2
+    assert main(STUBS[0].split()) == 2
     captured = capsys.readouterr()
     assert "not implemented" in captured.err
     assert captured.out == ""
