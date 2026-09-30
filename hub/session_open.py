@@ -97,7 +97,7 @@ def _open_readonly(db: Path) -> Iterator[sqlite3.Connection]:
             copy = Path(scratch) / db.name
             shutil.copyfile(wal, copy.with_name(wal.name))
             shutil.copyfile(db, copy)
-            target = f"file:{copy}?mode=ro"
+            target = copy.resolve().as_uri() + "?mode=ro"
         else:
             target = f"file:{db}?immutable=1"
         conn = sqlite3.connect(target, uri=True)
