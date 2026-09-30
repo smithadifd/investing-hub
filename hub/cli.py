@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from hub import ic, store
+from hub import ic, restore, store
 
 NOT_IMPLEMENTED_EXIT = 2
 
@@ -34,6 +34,11 @@ def _backup_args(parser: argparse.ArgumentParser) -> None:
         default=store.DEFAULT_BACKUP_DIR,
         help="backup directory (default: %(default)s, relative to the current directory)",
     )
+
+
+def _restore_check_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("backup", type=Path, help="backup file to verify (e.g. backups/hub-*.db)")
+    _db_path_arg(parser)
 
 
 def _fail(name: str, exc: Exception | str) -> int:
@@ -80,7 +85,29 @@ def cmd_db_backup(args: argparse.Namespace) -> int:
 
 
 def cmd_db_restore_check(args: argparse.Namespace) -> int:
-    return _not_implemented("db restore-check")
+    name = "db restore-check"
+    if not args.backup.is_file():
+        return _fail(name, f"backup not found: {args.backup}")
+    if not args.db.is_file():
+        return _fail(name, f"database not found: {args.db}")
+    try:
+        checks = restore.restore_check(args.backup, args.db)
+    except (sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+    print(restore.format_checks(checks))
+    failed = [c for c in checks if c.status == restore.FAIL]
+    if failed:
+        print(
+            f"FAIL: {len(failed)} of {len(checks)} checks failed; do not restore from this backup"
+        )
+        return 1
+    warned = [c for c in checks if c.status == restore.WARN]
+    if warned:
+        passed = len(checks) - len(warned)
+        print(f"PASS: {passed} passed, {len(warned)} warned, 0 failed")
+    else:
+        print(f"PASS: all {len(checks)} checks passed")
+    return 0
 
 
 def cmd_import_claude_export(args: argparse.Namespace) -> int:
@@ -156,6 +183,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db init": _db_path_arg,
     "db migrate": _db_path_arg,
     "db backup": _backup_args,
+    "db restore-check": _restore_check_args,
 }
 
 
