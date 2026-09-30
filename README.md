@@ -25,6 +25,7 @@ hub --help
 | `hub db init` / `migrate` / `backup` / `restore-check` | Local database lifecycle and backups |
 | `hub import claude-export` | Import a claude.ai export as document revisions |
 | `hub ic pull` / `docs` | Read the Investing Companion context pack and contract docs |
+| `scripts/hub-session.sh` | Start Claude Code with `MASSIVE_API_KEY` and `IC_API_TOKEN` resolved from `.env.local` (needs `OP_CONNECT_HOST`) |
 | `hub session-open` | Checks run when an advisor session opens |
 
 ## Onboarding
@@ -50,15 +51,25 @@ references and IC base URL. That file is gitignored.
 One-time setup:
 
 ```bash
+brew install uv                  # macOS; the dotfiles Brewfile lists it
 uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"
 cp .mcp.json.example .mcp.json   # local-only, gitignored
-cp .env.example .env             # holds a 1Password reference, not the key
+cp .env.example .env.local       # local-only, gitignored; holds 1Password references, not keys
 ```
 
-Start Claude Code with the key resolved into its environment (the resolver never prints it):
+Export the 1Password Connect URL (placeholder shown) and start Claude Code through the launcher.
+It resolves `MASSIVE_API_KEY` and `IC_API_TOKEN` from `.env.local` into the session environment
+(the resolver never prints them), so the `massive` MCP server and the SessionStart hook both see them:
 
 ```bash
-~/.claude/scripts/op-resolve.py --env-file .env -- claude
+export OP_CONNECT_HOST=http://<connect-host>:8090
+scripts/hub-session.sh            # extra args pass through: scripts/hub-session.sh -p '...'
+```
+
+The launcher wraps this resolver call:
+
+```bash
+OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- claude
 ```
 
 ## License
