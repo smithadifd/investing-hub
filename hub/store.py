@@ -154,7 +154,7 @@ def list_documents(conn: sqlite3.Connection) -> list[dict]:
 
 def integrity_check(path: Path) -> str:
     """Run `PRAGMA integrity_check` on the database file at `path`; return its verdict."""
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         rows = conn.execute("PRAGMA integrity_check").fetchall()
     finally:
@@ -218,7 +218,7 @@ def backup(
     partial = final.with_name(final.name + ".partial")
 
     try:
-        source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        source = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             dest = sqlite3.connect(partial)
             try:

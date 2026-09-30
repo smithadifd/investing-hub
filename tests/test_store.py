@@ -376,3 +376,50 @@ def test_cli_backup_failure_exits_1(tmp_path, capsys):
     db = tmp_path / "hub.db"
     assert main(["db", "backup", "--db", str(db), "--backup-dir", str(tmp_path / "b")]) == 1
     assert "database not found" in capsys.readouterr().err
+
+
+ODD_DIR = "odd dir #1 ?x"
+
+
+def test_backup_and_integrity_check_work_in_a_path_with_space_hash_and_question_mark(
+    tmp_path, capsys
+):
+    db = tmp_path / ODD_DIR / "data" / "hub.db"
+    backups = tmp_path / ODD_DIR / "backups"
+    assert main(["db", "init", "--db", str(db)]) == 0
+    capsys.readouterr()
+    assert main(["db", "backup", "--db", str(db), "--backup-dir", str(backups)]) == 0
+    assert "integrity_check ok" in capsys.readouterr().out
+    (copy,) = store.list_backups(backups)
+    assert store.integrity_check(copy) == "ok"
+    assert [p.name for p in tmp_path.iterdir()] == [ODD_DIR]
+    connection = sqlite3.connect(copy)
+    try:
+        assert _tables(connection) == ROADMAP_TABLES | {"schema_version"}
+    finally:
+        connection.close()
+
+
+def test_integrity_check_reads_a_path_with_space_hash_and_question_mark(tmp_path):
+    db = tmp_path / ODD_DIR / "hub.db"
+    connection = store.connect(db)
+    store.migrate(connection)
+    connection.close()
+    assert store.integrity_check(db) == "ok"
+    # A misparsed URI would quietly create an empty file under a truncated name.
+    assert [p.name for p in tmp_path.iterdir()] == [ODD_DIR]
+
+
+def test_backup_reads_its_source_from_a_path_with_space_hash_and_question_mark(tmp_path):
+    db = tmp_path / ODD_DIR / "hub.db"
+    connection = store.connect(db)
+    store.migrate(connection)
+    connection.close()
+    result = store.backup(db, tmp_path / "backups")
+    assert store.integrity_check(result.path) == "ok"
+    copy = sqlite3.connect(result.path)
+    try:
+        assert _tables(copy) == ROADMAP_TABLES | {"schema_version"}
+    finally:
+        copy.close()
+    assert [p.name for p in tmp_path.iterdir() if p.name != "backups"] == [ODD_DIR]

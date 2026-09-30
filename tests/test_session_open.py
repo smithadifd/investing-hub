@@ -419,3 +419,31 @@ def test_the_ic_fetch_uses_a_five_second_timeout(env, capsys, monkeypatch):
     monkeypatch.setattr(ic, "fetch_contract_docs", record)
     _run(capsys)
     assert seen == [5.0]
+
+
+def test_wal_copy_is_read_for_a_path_with_space_hash_and_question_mark(env, capsys, tmp_path):
+    odd = tmp_path / "odd dir #1 ?x"
+    odd.mkdir()
+    db = odd / "my hub #2 ?.db"
+    writer = store.connect(db)  # stays open: its WAL is live
+    store.migrate(writer)
+    writer.execute("INSERT INTO briefs (body) VALUES ('Odd path WAL brief')")
+    try:
+        assert db.with_name(db.name + "-wal").exists()
+        out = _run(capsys, "--db", str(db))
+    finally:
+        writer.close()
+    assert "Odd path WAL brief" in out
+
+
+def test_no_wal_store_is_read_for_a_path_with_space_hash_and_question_mark(env, capsys, tmp_path):
+    odd = tmp_path / "odd dir #1 ?x"
+    odd.mkdir()
+    db = odd / "my hub #2 ?.db"
+    conn = store.connect(db)
+    store.migrate(conn)
+    conn.execute("INSERT INTO briefs (body) VALUES ('Odd path plain brief')")
+    conn.close()
+    assert not db.with_name(db.name + "-wal").exists()
+    out = _run(capsys, "--db", str(db))
+    assert "Odd path plain brief" in out
