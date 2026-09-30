@@ -1,4 +1,4 @@
-"""Command-line entry point. Commands not yet implemented are stubs that exit 2."""
+"""Command-line entry point."""
 
 import argparse
 import os
@@ -7,14 +7,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from hub import ic, importer, restore, store
-
-NOT_IMPLEMENTED_EXIT = 2
-
-
-def _not_implemented(name: str) -> int:
-    print(f"hub {name}: not implemented", file=sys.stderr)
-    return NOT_IMPLEMENTED_EXIT
+from hub import ic, importer, restore, session_open, store
 
 
 def _db_path_arg(parser: argparse.ArgumentParser) -> None:
@@ -62,7 +55,6 @@ def _apply_migrations(name: str, db: Path) -> int:
     return 0
 
 
-# One stub per function: replace a function's body to implement that command.
 def cmd_db_init(args: argparse.Namespace) -> int:
     return _apply_migrations("db init", args.db)
 
@@ -193,8 +185,26 @@ def cmd_ic_docs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _session_open_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument(
+        "--stale-days",
+        type=int,
+        default=None,
+        metavar="N",
+        help="list documents whose latest revision is older than N days"
+        " (default: session_open.stale_days in config.yaml, else 30)",
+    )
+
+
 def cmd_session_open(args: argparse.Namespace) -> int:
-    return _not_implemented("session-open")
+    """Print the session-open status block. Always exits 0: a session must always open."""
+    try:
+        block = session_open.build_block(args.db, args.stale_days)
+    except Exception as exc:  # the block builder guards itself; this is the last resort
+        block = f"== hub session-open ==\nWARN session-open failed: {type(exc).__name__}"
+    print(block)
+    return 0
 
 
 # group -> subcommand -> (help, handler). A group of None is a top-level command.
@@ -238,6 +248,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db backup": _backup_args,
     "db restore-check": _restore_check_args,
     "import claude-export": _import_args,
+    "session-open": _session_open_args,
 }
 
 
