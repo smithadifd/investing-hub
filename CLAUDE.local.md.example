@@ -6,7 +6,11 @@
 
 ## Credential references (names only, never values)
 - IC read-only token: `op://<vault>/<item>/<field>`
-- Market data key: `op://<vault>/<item>/<field>`
+- Market data key (Massive): `op://Automation/Investing Companion - Secrets/MASSIVE_API_KEY`
+  Resolve it into the environment before starting Claude Code; `.mcp.json` reads
+  `MASSIVE_API_KEY` from there. Example (document only, run it yourself):
+  `export MASSIVE_API_KEY="$(~/.claude/scripts/op-resolve.py 'op://Automation/Investing Companion - Secrets/MASSIVE_API_KEY')"`
+  One-time server install (per Massive's docs): `uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"`
 
 ## Endpoints
 - IC base URL: `http://<ic-host>:8000`

@@ -81,6 +81,7 @@ copy can capture the database mid-write.
 | Variable | Purpose |
 |---|---|
 | `IC_API_TOKEN` | Read-only IC token, resolved at call time from a credential manager; never stored in the repo |
+| `MASSIVE_API_KEY` | Massive market-data key, read by the `massive` MCP server declared in `.mcp.json` via `${MASSIVE_API_KEY}` expansion; set it in the shell environment, never commit it |
 
 Per-machine values (IC base URL, credential references) live in the gitignored
 `CLAUDE.local.md` and `config.yaml`; see `CLAUDE.local.md.example` for the shape.
