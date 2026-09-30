@@ -64,16 +64,26 @@ The `--with 'mcp<2'` pin is required because mcp_massive 0.10.0 imports `mcp.ser
 uv tool install --force --with 'mcp<2' "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"
 ```
 
-Export the 1Password Connect URL (placeholder shown) and start Claude Code through the launcher.
-It resolves `MASSIVE_API_KEY` and `IC_API_TOKEN` from `.env.local` into the session environment
-(the resolver never prints them), so the `massive` MCP server and the SessionStart hook both see them:
+Start Claude Code through the launcher. It needs `MASSIVE_API_KEY` (for the `massive` MCP server) and
+`IC_API_TOKEN` (for the SessionStart hook) in the session environment, and supports three ways to get them there:
+
+| Path | For | What you do |
+|---|---|---|
+| `connect` | 1Password Connect users | `export OP_CONNECT_HOST=http://<connect-host>:8090`; `.env.local` holds the `op://` references and `~/.claude/scripts/op-resolve.py` resolves them |
+| `op` | 1Password CLI users | Sign in to `op`; `.env.local` holds the same `op://` references and `op run --env-file .env.local` resolves them |
+| `env` | Everyone else | Export `MASSIVE_API_KEY` and `IC_API_TOKEN` yourself (by hand or from another secrets manager); no `.env.local` needed |
 
 ```bash
-export OP_CONNECT_HOST=http://<connect-host>:8090
 scripts/hub-session.sh            # extra args pass through: scripts/hub-session.sh -p '...'
 ```
 
-The launcher wraps this resolver call:
+The launcher picks the path itself, in this order: `env` when both variables are already set, then
+`connect` when `OP_CONNECT_HOST` is set, then `op` when the `op` CLI is installed. Set
+`HUB_SESSION_MODE=connect|op|env` to force one. It prints `hub-session: using <mode>` to stderr
+before it starts `claude`, and exits 2 with a one-line message if no path is available or (for
+`connect` and `op`) `.env.local` is missing. Secrets are never printed.
+
+The `connect` path wraps this resolver call:
 
 ```bash
 OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- claude
