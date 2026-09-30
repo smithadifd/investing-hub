@@ -16,7 +16,7 @@
   and start Claude Code with `scripts/hub-session.sh` so the key reaches the `massive` MCP server as
   `MASSIVE_API_KEY` and the IC token reaches the SessionStart hook; the resolver never prints secrets.
   Equivalent: `OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- claude`
-  One-time setup: `uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"`
+  One-time setup: `uv tool install --with 'mcp<2' "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"`
   and `cp .mcp.json.example .mcp.json`
 
 ## Endpoints
