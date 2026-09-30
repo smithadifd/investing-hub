@@ -20,6 +20,9 @@ hub = "hub.cli:main"
 [tool.setuptools]
 packages = ["hub"]
 
+[tool.setuptools.package-data]
+hub = ["migrations/*.sql"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
