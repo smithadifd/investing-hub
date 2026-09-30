@@ -1,0 +1,15 @@
+# CLAUDE.local.md (copy to CLAUDE.local.md; gitignored, never commit)
+
+## Persona and preferences
+- <who the operator is, risk posture, tone, how blunt to be>
+- <what to always include or never do in advice>
+
+## Credential references (names only, never values)
+- IC read-only token: `op://<vault>/<item>/<field>`
+- Market data key: `op://<vault>/<item>/<field>`
+
+## Endpoints
+- IC base URL: `http://<ic-host>:8000`
+
+## Session log
+- <trim to the last ~10 entries>
