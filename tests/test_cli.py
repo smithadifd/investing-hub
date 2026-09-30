@@ -12,7 +12,15 @@ P0_COMMANDS = [
     "ic docs",
     "session-open",
 ]
-IMPLEMENTED = {"db init", "db migrate", "db backup", "db restore-check", "ic pull", "ic docs"}
+IMPLEMENTED = {
+    "db init",
+    "db migrate",
+    "db backup",
+    "db restore-check",
+    "import claude-export",
+    "ic pull",
+    "ic docs",
+}
 STUBS = [command for command in P0_COMMANDS if command not in IMPLEMENTED]
 
 

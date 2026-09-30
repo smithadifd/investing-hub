@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from hub import ic, restore, store
+from hub import ic, importer, restore, store
 
 NOT_IMPLEMENTED_EXIT = 2
 
@@ -111,7 +111,48 @@ def cmd_db_restore_check(args: argparse.Namespace) -> int:
 
 
 def cmd_import_claude_export(args: argparse.Namespace) -> int:
-    return _not_implemented("import claude-export")
+    name = "import claude-export"
+    try:
+        candidates, skipped = importer.scan(args.dir)
+        if args.apply:
+            conn = store.connect(args.db)
+            try:
+                store.migrate(conn)
+                planned = importer.plan(conn, candidates)
+                written = importer.write_new(conn, planned)
+            finally:
+                conn.close()
+        else:
+            planned = _dry_run_plan(args.db, candidates)
+            written = 0
+    except (importer.ImportError_, store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+    verb = {"new": "add" if args.apply else "would add", "unchanged": "unchanged"}
+    for state, cand in planned:
+        label = verb.get(state, "changed, left as is")
+        print(f"{label}: {cand.source_ref} ({cand.kind})")
+    for ref in skipped:
+        print(f"skipped: {ref} (served by Investing Companion)")
+    if args.apply:
+        print(f"{args.db}: {written} document(s) written")
+    else:
+        print("dry run: nothing written (use --apply)")
+    return 0
+
+
+def _dry_run_plan(db: Path, candidates):
+    """Plan against an existing database read-only; a missing one counts as empty."""
+    if not db.is_file():
+        return importer.plan(None, candidates)
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            return importer.plan(conn, candidates)
+        except sqlite3.OperationalError:  # schema not created yet
+            return importer.plan(None, candidates)
+    finally:
+        conn.close()
 
 
 def _ic_fail(name: str, exc: ic.IcError) -> int:
@@ -178,12 +219,23 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
 }
 
 
+def _import_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument("dir", type=Path, help="export directory to read")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run", action="store_true", help="print what would be written (default)"
+    )
+    mode.add_argument("--apply", action="store_true", help="write the new documents")
+
+
 # Full command name -> function adding that command's arguments to its parser.
 ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db init": _db_path_arg,
     "db migrate": _db_path_arg,
     "db backup": _backup_args,
     "db restore-check": _restore_check_args,
+    "import claude-export": _import_args,
 }
 
 
