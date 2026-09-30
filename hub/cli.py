@@ -1,6 +1,7 @@
 """Command-line entry point."""
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -364,7 +365,7 @@ def cmd_custodian_import(args: argparse.Namespace) -> int:
             name, f"{args.file}: only .csv files are imported (PDF statements are not parsed)"
         )
     try:
-        overrides = dict(custodian.parse_map_option(m) for m in args.map)
+        overrides = custodian.normalize_overrides(args.map, kind=args.kind)
         as_of_arg = custodian.parse_as_of(args.as_of) if args.as_of else None
         raw = args.file.read_bytes().decode("utf-8-sig")
         parsed = custodian.parse(raw, args.kind, overrides)
@@ -372,12 +373,20 @@ def cmd_custodian_import(args: argparse.Namespace) -> int:
         return _fail(name, exc)
     if parsed.missing:
         form = " ".join(f"--map '<header>={f}'" for f in parsed.missing)
+        headers_str = ", ".join(parsed.headers)
         return _fail(
             name,
             f"missing required {args.kind} column(s): {', '.join(parsed.missing)};"
+            f" headers found: {headers_str};"
             f" name them with {form}",
         )
     as_of = as_of_arg or parsed.newest_date
+    if args.apply:
+        if as_of is None:
+            return _fail(name, "no date found in the file; pass --as-of YYYY-MM-DD")
+        conn = _open_existing(name, args.db)
+        if isinstance(conn, int):
+            return conn
     print(f"{args.kind} file: {args.file} (header on row {parsed.header_row + 1})")
     for header, field_name in parsed.mapping_report():
         print(f"  {header} -> {field_name}")
@@ -386,17 +395,19 @@ def cmd_custodian_import(args: argparse.Namespace) -> int:
         print(f"as_of: {as_of or 'not found (pass --as-of to apply)'}")
         print("dry run: nothing written (use --apply)")
         return 0
-    if as_of is None:
-        return _fail(name, "no date found in the file; pass --as-of YYYY-MM-DD")
     ref = custodian.source_ref(args.file)
+    mapping_json = json.dumps(overrides, sort_keys=True) if overrides else None
     try:
-        conn = _open_existing(name, args.db)
-        if isinstance(conn, int):
-            return conn
         try:
             key = (args.custodian, args.kind, as_of, ref)
             snapshot_id, created = store.insert_custodian_snapshot(
-                conn, custodian=key[0], kind=key[1], as_of=key[2], source_ref=key[3], raw=raw
+                conn,
+                custodian=key[0],
+                kind=key[1],
+                as_of=key[2],
+                source_ref=key[3],
+                raw=raw,
+                mapping=mapping_json,
             )
             stored = None if created else store.get_custodian_snapshot_raw(conn, *key)
         finally:
@@ -427,11 +438,17 @@ def cmd_custodian_list(args: argparse.Namespace) -> int:
     except (store.StoreError, sqlite3.Error, OSError) as exc:
         return _fail(name, exc)
     headers = ["custodian", "kind", "as_of", "imported_at", "rows"]
-    rows = [
-        [s["custodian"], s["kind"], s["as_of"], s["imported_at"]]
-        + [str(custodian.count_rows(s["raw"], s["kind"]))]
-        for s in snaps
-    ]
+    rows = []
+    for s in snaps:
+        mapping_text = s.get("mapping")
+        stored_overrides = None
+        if mapping_text:
+            try:
+                stored_overrides = json.loads(mapping_text)
+            except (json.JSONDecodeError, TypeError):
+                stored_overrides = None
+        row_count = custodian.count_rows(s["raw"], s["kind"], stored_overrides)
+        rows.append([s["custodian"], s["kind"], s["as_of"], s["imported_at"], str(row_count)])
     widths = [max([len(h), *(len(r[i]) for r in rows)]) for i, h in enumerate(headers)]
     for line in [headers, *rows]:
         print("  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip())

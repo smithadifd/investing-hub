@@ -42,8 +42,8 @@ import/custodians/<custodian>/<YYYY-MM-DD>/<account-label>/statement.pdf
 ```
 
 Run it without `--apply` first to see how the headers map and how many rows were found; pass
-`--map "Header As Written=field"` for any column it does not recognise.
-
+`--map "Header As Written=field"` for any column it does not recognise. Overrides are persisted
+with the snapshot so `hub custodian list` reuses them when counting data rows.
 ## Onboarding
 
 The [onboarding kit](docs/onboarding/README.md) is a fill-in-the-blanks scaffold for standing up your

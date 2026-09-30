@@ -181,6 +181,7 @@ def insert_custodian_snapshot(
     as_of: str,
     source_ref: str,
     raw: str,
+    mapping: str | None = None,
 ) -> tuple[int, bool]:
     """Write one custodian snapshot unless `(custodian, kind, as_of, source_ref)` is stored.
 
@@ -197,9 +198,9 @@ def insert_custodian_snapshot(
             snapshot_id, created = row["id"], False
         else:
             snapshot_id = conn.execute(
-                "INSERT INTO custodian_snapshots (custodian, kind, as_of, source_ref, raw)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (custodian, kind, as_of, source_ref, raw),
+                "INSERT INTO custodian_snapshots (custodian, kind, as_of, source_ref, raw, mapping)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (custodian, kind, as_of, source_ref, raw, mapping),
             ).lastrowid
             created = True
     except BaseException:
@@ -222,9 +223,9 @@ def get_custodian_snapshot_raw(
 
 
 def list_custodian_snapshots(conn: sqlite3.Connection) -> list[dict]:
-    """Every snapshot (including `raw`), oldest `as_of` first."""
+    """Every snapshot (including `raw` and `mapping`), oldest `as_of` first."""
     rows = conn.execute(
-        "SELECT id, custodian, kind, as_of, source_ref, raw, imported_at"
+        "SELECT id, custodian, kind, as_of, source_ref, raw, mapping, imported_at"
         " FROM custodian_snapshots ORDER BY as_of, custodian, kind, id"
     )
     return [dict(row) for row in rows]

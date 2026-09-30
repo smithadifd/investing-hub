@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 
 import pytest
@@ -221,7 +222,8 @@ def test_transactions_missing_required_header_exits_1_with_map_form(db, tmp_path
     path = _write(tmp_path, "t.csv", "Date,Symbol,Price\n01/02/2026,TEST1,5\n")
     assert _import(db, path) == 1
     err = capsys.readouterr().err
-    assert "action, quantity" in err
+    assert "missing required transactions column(s): action, quantity" in err
+    assert "headers found: Date, Symbol, Price" in err
     assert "--map '<header>=action'" in err
     assert "--map '<header>=quantity'" in err
 
@@ -260,7 +262,9 @@ def test_positions_without_date_needs_as_of_to_apply(db, tmp_path, capsys):
     assert _import(db, path, kind="positions") == 0  # dry run still reports
     assert "pass --as-of" in capsys.readouterr().out
     assert _import(db, path, "--apply", kind="positions") == 1
-    assert "pass --as-of" in capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert "pass --as-of" in err
+    assert out == ""
     assert _snapshots(db) == []
 
 
@@ -273,7 +277,9 @@ def test_bad_as_of_and_missing_file_exit_1(db, tmp_path):
 def test_apply_needs_an_existing_database(tmp_path, capsys):
     path = _write(tmp_path, "t.csv", TRANSACTIONS)
     assert _import(tmp_path / "absent.db", path, "--apply") == 1
-    assert "hub db init" in capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert "hub db init" in err
+    assert out == ""
 
 
 # --- CLI: list ------------------------------------------------------------------------
@@ -304,3 +310,170 @@ def test_list_shows_snapshots_with_row_count_from_raw(db, tmp_path, capsys):
 def test_list_empty_prints_only_headers(db, capsys):
     assert main(["custodian", "list", "--db", str(db)]) == 0
     assert len(capsys.readouterr().out.splitlines()) == 1
+
+
+def test_list_uses_persisted_map_overrides_for_custom_headers(db, tmp_path, capsys):
+    custom_positions = "CustomTicker,CustomUnits\nTEST1,10\nTEST2,20\n"
+    path = _write(tmp_path, "custom.csv", custom_positions)
+    assert (
+        _import(
+            db,
+            path,
+            "--map",
+            "CustomTicker=symbol",
+            "--map",
+            "CustomUnits=quantity",
+            "--as-of",
+            "2026-02-01",
+            "--apply",
+            kind="positions",
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert main(["custodian", "list", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert len(lines) == 2
+    assert lines[1].split()[-1] == "2"
+
+
+def test_migration_0002_applies_to_db_at_0001(tmp_path):
+    db = tmp_path / "hub.db"
+    conn = store.connect(db)
+    migrations_0001 = [m for m in store.load_migrations() if m.version == 1]
+    assert len(migrations_0001) == 1
+    store.migrate(conn, migrations_0001)
+    columns_before = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
+    assert "mapping" not in columns_before
+    applied = store.migrate(conn)
+    assert applied == ["0002_custodian_mapping.sql"]
+    columns_after = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
+    assert "mapping" in columns_after
+    snap_id, created = store.insert_custodian_snapshot(
+        conn,
+        custodian="testco",
+        kind="positions",
+        as_of="2026-02-01",
+        source_ref="drop/positions.csv",
+        raw="CustomTicker,CustomUnits\nTEST1,10\n",
+        mapping='{"customticker": "symbol"}',
+    )
+    assert created is True
+    snaps = store.list_custodian_snapshots(conn)
+    assert len(snaps) == 1
+    assert snaps[0]["mapping"] == '{"customticker": "symbol"}'
+    conn.close()
+
+
+def test_map_duplicate_normalized_headers_rejected(db, tmp_path, capsys):
+    path = _write(tmp_path, "onecol.csv", "Holding\nTEST1\n")
+    assert (
+        _import(
+            db,
+            path,
+            "--map",
+            "Holding=symbol",
+            "--map",
+            "holding=quantity",
+            kind="positions",
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "duplicate normalized override header" in err
+    assert len(err.strip().splitlines()) == 1
+
+
+def test_map_duplicate_target_field_rejected(db, tmp_path, capsys):
+    path = _write(tmp_path, "twocol.csv", "ColA,ColB\nTEST1,10\n")
+    assert (
+        _import(
+            db,
+            path,
+            "--map",
+            "ColA=symbol",
+            "--map",
+            "ColB=symbol",
+            kind="positions",
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "duplicate target field in --map" in err
+    assert len(err.strip().splitlines()) == 1
+
+
+def test_column_mapped_to_multiple_fields_rejected(monkeypatch):
+    text = "Ticker,Qty\nTEST1,10\n"
+    monkeypatch.setattr(
+        custodian, "_map_row", lambda kind, row, overrides: ({"symbol": 0, "quantity": 0}, [])
+    )
+    with pytest.raises(custodian.CustodianError, match="supplies more than one field"):
+        custodian.parse(text, "positions")
+
+
+def test_csv_error_wrapped_in_custodian_error(db, tmp_path, capsys):
+    old_limit = csv.field_size_limit(32)
+    try:
+        field = "X" * 64
+        path = _write(
+            tmp_path, "large.csv", f"Date,Action,Symbol,Quantity\n01/02/2026,Buy,{field},1\n"
+        )
+        assert _import(db, path) == 1
+        err = capsys.readouterr().err
+        assert "CSV parse error" in err
+        assert len(err.strip().splitlines()) == 1
+    finally:
+        csv.field_size_limit(old_limit)
+
+
+def test_iso8601_datetime_cells_parsed_and_newest_date_selected():
+    text = (
+        "Date,Action,Symbol,Quantity\n"
+        "2026-01-02T15:30:00Z,Buy,TEST1,10\n"
+        "2026-01-09T18:45:00.123456-05:00,Sell,TEST2,5\n"
+        "2026-01-05T00:00:00+02:00,Buy,TEST3,1\n"
+    )
+    parsed = custodian.parse(text, "transactions")
+    assert parsed.dates == ["2026-01-02", "2026-01-09", "2026-01-05"]
+    assert parsed.newest_date == "2026-01-09"
+
+
+def test_trailing_total_summary_and_disclaimer_rows_ignored():
+    text = (
+        "Ticker,Shares\nTEST1,10\nTEST2,20\nAccount Total,\nDisclaimer: synthetic test data only\n"
+    )
+    parsed = custodian.parse(text, "positions", {"Shares": "quantity"})
+    assert len(parsed.rows) == 2
+    assert custodian.count_rows(text, "positions", {"Shares": "quantity"}) == 2
+
+    text_nums = 'Ticker,Shares\nTEST1,(15.5)\nTEST2,"1,250"\nTEST3,-50\nTotal,30\n'
+    parsed_nums = custodian.parse(text_nums, "positions", {"Shares": "quantity"})
+    assert len(parsed_nums.rows) == 3
+
+
+def test_apply_fails_before_printing_mapping_report(tmp_path, capsys):
+    path = _write(tmp_path, "p.csv", POSITIONS)
+    assert (
+        _import(
+            tmp_path / "absent.db",
+            path,
+            "--apply",
+            "--as-of",
+            "2026-02-01",
+            kind="positions",
+        )
+        == 1
+    )
+    out, err = capsys.readouterr()
+    assert "hub db init" in err
+    assert out == ""
+
+    db = tmp_path / "hub.db"
+    assert main(["db", "init", "--db", str(db)]) == 0
+    capsys.readouterr()
+    assert _import(db, path, "--apply", kind="positions") == 1
+    out, err = capsys.readouterr()
+    assert "no date found in the file; pass --as-of YYYY-MM-DD" in err
+    assert out == ""

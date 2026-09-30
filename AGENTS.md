@@ -58,11 +58,13 @@ re-imported. Its default is a dry run that writes nothing. `hub ic pull` calls t
 `hub custodian import` takes `--db PATH`, reads `.csv` only (anything else exits 1; PDFs are not
 parsed), skips lines above the header row, and matches headers case- and punctuation-insensitively
 against synonym sets in `hub/custodian.py`. Required: transactions `date, action, symbol, quantity`;
-positions `symbol, quantity`. A missing one exits 1 naming it and the `--map 'header=field'` form.
-`--apply` needs an existing database and writes one snapshot (`raw` = the file text, `source_ref` =
-the path relative to the repo, else as given, `as_of` from `--as-of` or the newest date in a date
-column); a repeat of the same `(custodian, kind, as_of, source_ref)` is a no-op. `hub custodian list`
-takes `--db PATH`. Drop layout: README "Custodian exports".
+positions `symbol, quantity`. A missing one exits 1 naming it, the file's headers and the
+`--map 'header=field'` form. `--apply` needs an existing database and writes one snapshot
+(`raw` = the file text, `mapping` = stored `--map` overrides, `source_ref` = the path relative
+to the repo, else as given, `as_of` from `--as-of` or the newest date in a date column); a repeat
+of the same `(custodian, kind, as_of, source_ref)` is a no-op. `hub custodian list` takes `--db PATH`
+and reuses stored mappings when counting rows (ignoring trailing summary, total and disclaimer lines).
+Drop layout: README "Custodian exports".
 
 `hub doc list|show|revise` take `--db PATH`. `revise` appends a revision with `source_kind = session`
 and prints `<slug> revision N (session)`; creating a new slug needs `--kind`, and an empty body

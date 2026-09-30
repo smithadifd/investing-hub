@@ -134,12 +134,79 @@ def parse_date_cell(value: str) -> str | None:
         text = text[: text.lower().index(" as of ")].strip()
     if not text:
         return None
+    try:
+        return datetime.fromisoformat(text).strftime("%Y-%m-%d")
+    except ValueError:
+        pass
     for fmt in (*_DATE_FORMATS, *_DATETIME_FORMATS):
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
     return None
+
+
+def _parse_quantity(val: str) -> float | None:
+    """Parse a quantity string allowing commas, parentheses for negative, and leading minus."""
+    text = val.strip()
+    if not text:
+        return None
+    if text.startswith("(") and text.endswith(")"):
+        text = "-" + text[1:-1].strip()
+    text = text.replace(",", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def normalize_overrides(
+    overrides: dict[str, str] | list[tuple[str, str]] | list[str] | None,
+    kind: str | None = None,
+) -> dict[str, str]:
+    """Normalize override headers and validate no duplicate headers or duplicate target fields.
+
+    Returns a dict mapping normalized header -> field_name.
+    """
+    if not overrides:
+        return {}
+    if isinstance(overrides, dict):
+        pairs = list(overrides.items())
+    elif isinstance(overrides, list):
+        pairs = []
+        for item in overrides:
+            if isinstance(item, tuple):
+                pairs.append(item)
+            elif isinstance(item, str):
+                pairs.append(parse_map_option(item))
+            else:
+                pairs.append(item)
+    else:
+        pairs = list(overrides)
+
+    normalized: dict[str, str] = {}
+    seen_fields: dict[str, str] = {}
+    for raw_header, field_name in pairs:
+        norm_header = normalize_header(raw_header)
+        if not norm_header:
+            raise CustodianError(f"invalid override header: {raw_header!r}")
+        if norm_header in normalized:
+            raise CustodianError(f"duplicate normalized override header: {raw_header!r}")
+        if field_name in seen_fields:
+            raise CustodianError(f"duplicate target field in --map: {field_name!r}")
+        normalized[norm_header] = field_name
+        seen_fields[field_name] = raw_header
+
+    if kind is not None:
+        if kind not in KINDS:
+            raise CustodianError(f"unknown kind {kind!r}; expected one of {', '.join(KINDS)}")
+        bad = sorted(set(normalized.values()) - set(SYNONYMS[kind]))
+        if bad:
+            raise CustodianError(
+                f"unknown field(s) in --map: {', '.join(bad)}; "
+                f"{kind} fields are {', '.join(SYNONYMS[kind])}"
+            )
+    return normalized
 
 
 def repo_root() -> Path:
@@ -177,7 +244,10 @@ class Parsed:
 
 
 def _read_rows(text: str) -> list[list[str]]:
-    return list(csv.reader(io.StringIO(text, newline="")))
+    try:
+        return list(csv.reader(io.StringIO(text, newline="")))
+    except csv.Error as exc:
+        raise CustodianError(f"CSV parse error: {exc}") from exc
 
 
 def _map_row(
@@ -206,27 +276,25 @@ def _map_row(
     return mapping, absent
 
 
-def parse(text: str, kind: str, overrides: dict[str, str] | None = None) -> Parsed:
+def parse(
+    text: str,
+    kind: str,
+    overrides: dict[str, str] | list[tuple[str, str]] | list[str] | None = None,
+) -> Parsed:
     """Find the header row, map its columns and collect the data rows.
 
-    `overrides` maps a header (as written, matched case/punctuation-insensitively) to a field
-    name. Raises CustodianError when no row looks like a header, or an override names an unknown
+    `overrides` maps a header (matched case/punctuation-insensitively) to a field name.
+    Raises CustodianError when no row looks like a header, or an override names an unknown
     field or a header the file lacks. Missing required fields are reported in `Parsed.missing`.
     """
     if kind not in KINDS:
         raise CustodianError(f"unknown kind {kind!r}; expected one of {', '.join(KINDS)}")
-    overrides = overrides or {}
-    bad = sorted(set(overrides.values()) - set(SYNONYMS[kind]))
-    if bad:
-        raise CustodianError(
-            f"unknown field(s) in --map: {', '.join(bad)}; "
-            f"{kind} fields are {', '.join(SYNONYMS[kind])}"
-        )
+    norm_overrides = normalize_overrides(overrides, kind=kind)
     rows = _read_rows(text)
     best: tuple[int, dict[str, int], list[str]] | None = None
     best_score = 0
     for index, row in enumerate(rows[:MAX_HEADER_SCAN_ROWS]):
-        mapping, _ = _map_row(kind, row, overrides)
+        mapping, _ = _map_row(kind, row, norm_overrides)
         score = len(mapping)
         if score > best_score:
             best, best_score = (index, mapping, row), score
@@ -236,11 +304,41 @@ def parse(text: str, kind: str, overrides: dict[str, str] | None = None) -> Pars
             f" ({kind} need {', '.join(REQUIRED[kind])} columns)"
         )
     header_row, mapping, headers = best
-    _, absent = _map_row(kind, headers, overrides)
+    _, absent = _map_row(kind, headers, norm_overrides)
     if absent:
         raise CustodianError(f"--map header not found in the file: {', '.join(absent)}")
-    data = [r for r in rows[header_row + 1 :] if any(cell.strip() for cell in r)]
+
+    col_fields: dict[int, list[str]] = {}
+    for field_name, col in mapping.items():
+        col_fields.setdefault(col, []).append(field_name)
+    multi = {col: fields for col, fields in col_fields.items() if len(fields) > 1}
+    if multi:
+        for col, fields in multi.items():
+            col_name = headers[col] if col < len(headers) else f"column {col}"
+            raise CustodianError(
+                f"column {col_name!r} supplies more than one field: {', '.join(fields)}"
+            )
+
     missing = [f for f in REQUIRED[kind] if f not in mapping]
+    candidate_rows = [r for r in rows[header_row + 1 :] if any(cell.strip() for cell in r)]
+    if not missing:
+        required_cols = [mapping[f] for f in REQUIRED[kind]]
+        qty_col = mapping.get("quantity")
+        sym_col = mapping.get("symbol")
+        data = []
+        for r in candidate_rows:
+            if not all(col < len(r) and r[col].strip() for col in required_cols):
+                continue
+            if sym_col is not None and sym_col < len(r):
+                if r[sym_col].strip().lower() in ("total", "account total"):
+                    continue
+            if qty_col is not None and qty_col < len(r):
+                if _parse_quantity(r[qty_col]) is None:
+                    continue
+            data.append(r)
+    else:
+        data = candidate_rows
+
     dates: list[str] = []
     if "date" in mapping:
         col = mapping["date"]
@@ -251,9 +349,13 @@ def parse(text: str, kind: str, overrides: dict[str, str] | None = None) -> Pars
     return Parsed(kind, header_row, mapping, headers, data, missing, dates)
 
 
-def count_rows(text: str, kind: str) -> int:
+def count_rows(
+    text: str,
+    kind: str,
+    overrides: dict[str, str] | list[tuple[str, str]] | list[str] | None = None,
+) -> int:
     """Data rows in a stored file, or 0 when no header can be found."""
     try:
-        return len(parse(text, kind).rows)
+        return len(parse(text, kind, overrides).rows)
     except CustodianError:
         return 0
