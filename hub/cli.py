@@ -228,6 +228,112 @@ def cmd_session_open(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doc_list_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument(
+        "--titles", action="store_true", help="also show each document's title (hidden by default)"
+    )
+
+
+def _doc_show_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument("slug", help="document slug")
+    parser.add_argument(
+        "--revision", type=int, default=None, metavar="N", help="revision to show (default: latest)"
+    )
+
+
+def _doc_revise_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument("slug", help="document slug")
+    parser.add_argument("--source-ref", required=True, help="handle of the session making the edit")
+    parser.add_argument(
+        "--body-file",
+        type=Path,
+        default=None,
+        help="file holding the new body (default: read the body from stdin)",
+    )
+    parser.add_argument("--kind", default=None, help="document kind (required for a new slug)")
+    parser.add_argument("--title", default=None, help="document title (new slug only)")
+
+
+def _open_existing(name: str, db: Path) -> sqlite3.Connection | int:
+    if not db.is_file():
+        return _fail(name, f"database not found: {db} (run `hub db init`)")
+    return store.connect(db)
+
+
+def cmd_doc_list(args: argparse.Namespace) -> int:
+    name = "doc list"
+    try:
+        conn = _open_existing(name, args.db)
+        if isinstance(conn, int):
+            return conn
+        try:
+            docs = store.list_documents(conn)
+        finally:
+            conn.close()
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+    headers = ["slug", "kind", "revision", "source_kind", "revised_at"]
+    if args.titles:
+        headers.append("title")
+    rows = [[str(d["title"] or "") if h == "title" else str(d[h]) for h in headers] for d in docs]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    for line in [headers, *rows]:
+        print("  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip())
+    return 0
+
+
+def cmd_doc_show(args: argparse.Namespace) -> int:
+    name = "doc show"
+    try:
+        conn = _open_existing(name, args.db)
+        if isinstance(conn, int):
+            return conn
+        try:
+            doc = store.get_document_revision(conn, args.slug, args.revision)
+        finally:
+            conn.close()
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+    sys.stdout.write(doc["body"])
+    return 0
+
+
+def cmd_doc_revise(args: argparse.Namespace) -> int:
+    name = "doc revise"
+    try:
+        body = args.body_file.read_text() if args.body_file else sys.stdin.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        return _fail(name, exc)
+    if not body.strip():
+        return _fail(name, "empty body refused")
+    try:
+        conn = _open_existing(name, args.db)
+        if isinstance(conn, int):
+            return conn
+        try:
+            exists = conn.execute("SELECT 1 FROM documents WHERE slug = ?", (args.slug,)).fetchone()
+            if exists is None and args.kind is None:
+                return _fail(name, f"new document {args.slug}: --kind is required")
+            revision = store.insert_document_revision(
+                conn,
+                slug=args.slug,
+                kind=args.kind or "",
+                body=body,
+                source_kind="session",
+                source_ref=args.source_ref,
+                title=args.title,
+            )
+        finally:
+            conn.close()
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+    print(f"{args.slug} revision {revision} (session)")
+    return 0
+
+
 # group -> subcommand -> (help, handler). A group of None is a top-level command.
 COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], int]]]] = {
     "db": {
@@ -245,6 +351,11 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
     "ic": {
         "pull": ("fetch the Investing Companion context pack", cmd_ic_pull),
         "docs": ("show Investing Companion's contract docs", cmd_ic_docs),
+    },
+    "doc": {
+        "list": ("list documents with their latest revision", cmd_doc_list),
+        "show": ("print one revision of a document", cmd_doc_show),
+        "revise": ("append a session revision to a document", cmd_doc_revise),
     },
     None: {
         "session-open": ("run the session-open checks", cmd_session_open),
@@ -269,6 +380,9 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db backup": _backup_args,
     "db restore-check": _restore_check_args,
     "import claude-export": _import_args,
+    "doc list": _doc_list_args,
+    "doc show": _doc_show_args,
+    "doc revise": _doc_revise_args,
     "session-open": _session_open_args,
 }
 

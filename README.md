@@ -26,6 +26,7 @@ hub --help
 | `hub import claude-export` | Import a claude.ai export as document revisions |
 | `hub ic pull` / `docs` | Read the Investing Companion context pack and contract docs |
 | `scripts/hub-session.sh` | Start Claude Code with `MASSIVE_API_KEY` and `IC_API_TOKEN` resolved from `.env.local` (needs `OP_CONNECT_HOST`) |
+| `hub doc list` / `show` / `revise` | List documents, print any revision of one, and append a session revision (`revise` needs `--source-ref`; a new slug needs `--kind`) |
 | `hub session-open` | Checks run when an advisor session opens |
 
 ## Onboarding
