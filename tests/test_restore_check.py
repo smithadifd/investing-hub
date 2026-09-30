@@ -1,4 +1,5 @@
 import hashlib
+import shutil
 import sqlite3
 import tempfile
 from datetime import UTC, datetime
@@ -204,3 +205,66 @@ def test_missing_live_database_exits_1_with_one_line(good_backup, tmp_path, caps
     assert err.count("\n") == 1
     assert "database not found" in err
     assert not (tmp_path / "absent.db").exists()
+
+
+def _line(out, prefix):
+    return next(line for line in out.splitlines() if line.startswith(prefix))
+
+
+def test_row_count_lag_alone_warns(live, good_backup, capsys):
+    conn = store.connect(live)
+    _add(conn, 5)
+    conn.close()
+    bconn = sqlite3.connect(good_backup)
+    newest = bconn.execute("SELECT MAX(created_at) FROM document_revisions").fetchone()[0]
+    bconn.close()
+    _insert(live, f"UPDATE document_revisions SET created_at = '{newest}'")
+    code, out, _ = _run(capsys, good_backup, live)
+    assert code == 0, out
+    rows_line = _line(out, "rows: document_revisions")
+    assert "WARN" in rows_line
+    assert "backup 60, live 65" in rows_line
+    assert "PASS" in _line(out, "newest document_revisions.created_at")
+
+
+def test_backup_with_revisions_against_live_without_fails(live, good_backup, capsys):
+    _insert(live, "DELETE FROM document_revisions")
+    code, out, _ = _run(capsys, good_backup, live)
+    assert code == 1
+    newest_line = _line(out, "newest document_revisions.created_at")
+    assert "FAIL" in newest_line
+    assert "backup is newer" in newest_line
+    assert "live None" in newest_line
+
+
+def test_summary_counts_warnings(live, good_backup, capsys):
+    conn = store.connect(live)
+    _add(conn, 5)
+    conn.close()
+    code, out, _ = _run(capsys, good_backup, live)
+    assert code == 0, out
+    summary = out.strip().splitlines()[-1]
+    assert "all" not in summary
+    assert summary == "PASS: 12 passed, 2 warned, 0 failed"
+
+
+def test_summary_without_warnings_says_all_passed(live, good_backup, capsys):
+    code, out, _ = _run(capsys, good_backup, live)
+    assert code == 0, out
+    summary = out.strip().splitlines()[-1]
+    assert summary.startswith("PASS: all ")
+    assert "warned" not in summary
+
+
+def test_live_path_with_space_hash_and_question_mark(tmp_path, capsys):
+    path = tmp_path / "my data #1 what?" / "hub.db"
+    conn = store.connect(path)
+    store.migrate(conn)
+    _add(conn, 6)
+    conn.close()
+    backup = tmp_path / "copy.db"
+    shutil.copyfile(path, backup)
+    code, out, err = _run(capsys, backup, path)
+    assert code == 0, out
+    assert err == ""
+    assert "backup 6, live 6" in out

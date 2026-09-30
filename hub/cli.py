@@ -101,7 +101,12 @@ def cmd_db_restore_check(args: argparse.Namespace) -> int:
             f"FAIL: {len(failed)} of {len(checks)} checks failed; do not restore from this backup"
         )
         return 1
-    print(f"PASS: all {len(checks)} checks passed")
+    warned = [c for c in checks if c.status == restore.WARN]
+    if warned:
+        passed = len(checks) - len(warned)
+        print(f"PASS: {passed} passed, {len(warned)} warned, 0 failed")
+    else:
+        print(f"PASS: all {len(checks)} checks passed")
     return 0
 
 
