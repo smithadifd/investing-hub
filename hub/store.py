@@ -205,8 +205,9 @@ def backup(
     """Copy the live database with the online backup API, verify the copy, then prune.
 
     The copy is written as `<name>.partial`, checked with `PRAGMA integrity_check`, and only
-    renamed to its final `hub-<UTC timestamp>.db` name when the check returns `ok`. A failed
-    check raises `StoreError`, leaves the `.partial` file for inspection and prunes nothing.
+    renamed to its final `hub-<UTC timestamp>.db` name when the check returns `ok`. If the
+    copy or the check fails, the `.partial` file is deleted, the error is raised (a failed check
+    as a one-line `StoreError`) and nothing is pruned.
     """
     db_path = Path(db_path)
     backup_dir = Path(backup_dir)
@@ -216,20 +217,27 @@ def backup(
     final = _backup_path(backup_dir, now or datetime.now(UTC))
     partial = final.with_name(final.name + ".partial")
 
-    source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        dest = sqlite3.connect(partial)
+        source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
-            source.backup(dest)
-            # A standalone file: no -wal/-shm companions next to the copy.
-            dest.execute("PRAGMA journal_mode = DELETE")
+            dest = sqlite3.connect(partial)
+            try:
+                source.backup(dest)
+                # A standalone file: no -wal/-shm companions next to the copy.
+                dest.execute("PRAGMA journal_mode = DELETE")
+            finally:
+                dest.close()
         finally:
-            dest.close()
-    finally:
-        source.close()
+            source.close()
 
-    verdict = integrity_check(partial)
-    if verdict != "ok":
-        raise StoreError(f"integrity check failed on backup {partial}: {verdict}")
-    partial.rename(final)
+        verdict = integrity_check(partial)
+        if verdict != "ok":
+            lines = verdict.splitlines() or [verdict]
+            more = f" (+{len(lines) - 1} more)" if len(lines) > 1 else ""
+            raise StoreError(f"backup failed integrity_check: {lines[0]}{more}")
+        partial.rename(final)
+    except BaseException:
+        # Never leave a failed copy behind: repeated failures would accumulate partials.
+        partial.unlink(missing_ok=True)
+        raise
     return BackupResult(final, prune_backups(backup_dir, keep))

@@ -226,10 +226,81 @@ def test_failed_integrity_check_fails_loudly_and_prunes_nothing(
     backups = tmp_path / "backups"
     kept = [store.backup(db_path, backups, now=T0 + timedelta(days=d)).path for d in range(7)]
     monkeypatch.setattr(store, "integrity_check", lambda path: "*** in database main ***")
-    with pytest.raises(store.StoreError, match="integrity check failed"):
+    with pytest.raises(store.StoreError, match="backup failed integrity_check"):
         store.backup(db_path, backups, now=T0 + timedelta(days=30))
     assert store.list_backups(backups) == kept
-    assert [p.name for p in backups.glob("*.partial")] == ["hub-20260201T030405678901Z.db.partial"]
+    assert list(backups.glob("*.partial")) == []
+
+
+def _corrupt_index_db(path):
+    """A database whose index disagrees with its table: readable, copyable, but not `ok`."""
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE TABLE t (k TEXT)")
+        connection.execute("CREATE INDEX t_k ON t (k)")
+        connection.executemany("INSERT INTO t VALUES (?)", [(f"key-{i:04d}",) for i in range(40)])
+        connection.commit()
+        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+        root = connection.execute(
+            "SELECT rootpage FROM sqlite_master WHERE name = 't_k'"
+        ).fetchone()
+    finally:
+        connection.close()
+    data = bytearray(path.read_bytes())
+    start = (root[0] - 1) * page_size
+    page = bytes(data[start : start + page_size])
+    assert page.count(b"key-0001") == 1
+    data[start : start + page_size] = page.replace(b"key-0001", b"key-9999")
+    path.write_bytes(bytes(data))
+
+
+def test_real_corruption_fails_the_check_and_leaves_nothing(tmp_path):
+    db = tmp_path / "corrupt.db"
+    _corrupt_index_db(db)
+    first, *rest = store.integrity_check(db).splitlines()
+    assert first != "ok"
+    backups = tmp_path / "backups"
+    with pytest.raises(store.StoreError) as raised:
+        store.backup(db, backups, now=T0)
+    message = str(raised.value)
+    assert message == f"backup failed integrity_check: {first} (+{len(rest)} more)"
+    assert rest
+    assert "\n" not in message
+    assert list(backups.iterdir()) == []
+
+
+class _FailingCopy:
+    """Wraps a connection so the online-backup copy writes pages and then fails."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def backup(self, target):
+        self._connection.backup(target._connection)
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def test_failed_copy_removes_the_partial(conn, db_path, tmp_path, monkeypatch):
+    _seed(conn)
+    backups = tmp_path / "backups"
+    kept = store.backup(db_path, backups, now=T0).path
+    real_connect = sqlite3.connect
+    written = []
+
+    def connect(target, *args, **kwargs):
+        if not str(target).startswith("file:"):
+            written.append(target)
+        return _FailingCopy(real_connect(target, *args, **kwargs))
+
+    monkeypatch.setattr(store.sqlite3, "connect", connect)
+    with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+        store.backup(db_path, backups, now=T0 + timedelta(days=1))
+    monkeypatch.undo()
+    assert written == [backups / "hub-20260103T030405678901Z.db.partial"]
+    assert sorted(backups.iterdir()) == [kept]
 
 
 def test_backup_of_missing_database_fails(tmp_path):
@@ -279,6 +350,26 @@ def test_cli_migrate_without_database_fails(tmp_path, capsys):
     assert main(["db", "migrate", "--db", str(db)]) == 1
     assert "hub db init" in capsys.readouterr().err
     assert not db.exists()
+
+
+def test_cli_integrity_failure_prints_one_line(tmp_path, capsys):
+    db = tmp_path / "corrupt.db"
+    _corrupt_index_db(db)
+    backups = tmp_path / "b"
+    assert main(["db", "backup", "--db", str(db), "--backup-dir", str(backups)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("hub db backup: backup failed integrity_check: ")
+    assert err.count("\n") == 1
+    assert list(backups.iterdir()) == []
+
+
+def test_cli_init_filesystem_error_exits_1(tmp_path, capsys):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a regular file where the data directory should be")
+    assert main(["db", "init", "--db", str(blocker / "hub.db")]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("hub db init: ")
+    assert err.count("\n") == 1
 
 
 def test_cli_backup_failure_exits_1(tmp_path, capsys):

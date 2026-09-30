@@ -35,7 +35,7 @@ def _backup_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _fail(name: str, exc: Exception) -> int:
+def _fail(name: str, exc: Exception | str) -> int:
     print(f"hub {name}: {exc}", file=sys.stderr)
     return 1
 
@@ -47,7 +47,7 @@ def _apply_migrations(name: str, db: Path) -> int:
             applied = store.migrate(conn)
         finally:
             conn.close()
-    except (store.StoreError, sqlite3.Error) as exc:
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
         return _fail(name, exc)
     if applied:
         print(f"{db}: applied {', '.join(applied)}")

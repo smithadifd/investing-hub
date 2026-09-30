@@ -70,7 +70,7 @@ tracked in a `schema_version` table. Connections use WAL mode with foreign keys 
 schema change as the next `hub/migrations/NNNN_name.sql`; never edit an applied migration.
 Back up only with `hub db backup` (the online `.backup` API); a plain file copy can capture the
 database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fails
-`PRAGMA integrity_check` is left as `.partial`, the command exits 1 and nothing is pruned.
+`PRAGMA integrity_check` is deleted, the command exits 1 and nothing is pruned.
 
 ## Conventions
 
