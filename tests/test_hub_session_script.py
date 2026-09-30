@@ -1,27 +1,68 @@
-"""The session launcher fails fast and clearly; it never execs op-resolve or claude here."""
+"""The session launcher picks one of three credential paths and execs it with argv intact.
+
+Every executable it can reach (claude, op, op-resolve.py) is a stub on a temp PATH/HOME that
+prints its argv; nothing real is called and no reference is resolved.
+"""
 
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "hub-session.sh"
-MSG = (
-    "hub-session: OP_CONNECT_HOST is not set; export the 1Password Connect URL first "
-    "(see README § Massive)"
+BOTH = {"MASSIVE_API_KEY": "placeholder-a", "IC_API_TOKEN": "placeholder-b"}
+CONNECT = {"OP_CONNECT_HOST": "http://<connect-host>:8090"}
+NO_PATH_MSG = (
+    "hub-session: no credential path found; export MASSIVE_API_KEY and IC_API_TOKEN (env), "
+    "set OP_CONNECT_HOST (connect), or install the 1Password CLI op (op); see README § Massive"
 )
+MODE_VARS = ("OP_CONNECT_HOST", "MASSIVE_API_KEY", "IC_API_TOKEN", "HUB_SESSION_MODE")
 
 
-def _env(**extra: str) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k != "OP_CONNECT_HOST"}
-    env.update(extra)
-    return env
+class Sandbox:
+    """A temp repo copy, HOME and stub bin dir; `run` launches the copied script."""
+
+    def __init__(self, root: Path, *, with_op: bool, with_env_local: bool) -> None:
+        self.root = root
+        (root / "scripts").mkdir()
+        self.script = root / "scripts" / "hub-session.sh"
+        shutil.copy(SCRIPT, self.script)
+        if with_env_local:
+            (root / ".env.local").write_text("PLACEHOLDER=op://<vault>/<item>/<field>\n")
+        self.home = root / "home"
+        self.bin = root / "bin"
+        (self.home / ".claude" / "scripts").mkdir(parents=True)
+        self.bin.mkdir()
+        self._stub(self.bin / "claude", "claude")
+        self._stub(self.home / ".claude" / "scripts" / "op-resolve.py", "op-resolve")
+        if with_op:
+            self._stub(self.bin / "op", "op")
+
+    @staticmethod
+    def _stub(path: Path, name: str) -> None:
+        path.write_text(
+            f"#!/bin/sh\nprintf '{name}'\nfor a in \"$@\"; do printf ' [%s]' \"$a\"; done\necho\n"
+        )
+        path.chmod(0o755)
+
+    def run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        env = {k: v for k, v in os.environ.items() if k not in MODE_VARS}
+        env.update(HOME=str(self.home), PATH=f"{self.bin}:/usr/bin:/bin")
+        env.update(extra)
+        return subprocess.run(
+            ["bash", str(self.script), *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
 
 
-def _run(script: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["bash", str(script)], env=env, capture_output=True, text=True, timeout=30
-    )
+@pytest.fixture
+def box(tmp_path: Path) -> Sandbox:
+    return Sandbox(tmp_path, with_op=True, with_env_local=True)
 
 
 def test_syntax_is_valid() -> None:
@@ -29,23 +70,92 @@ def test_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_unset_connect_host_exits_2_with_one_line() -> None:
-    result = _run(SCRIPT, _env())
+def test_env_mode_execs_claude_directly_with_passthrough(box: Sandbox) -> None:
+    result = box.run("-p", "hello world", **BOTH)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "claude [-p] [hello world]\n"
+    assert result.stderr == "hub-session: using env\n"
+
+
+def test_env_wins_over_connect_and_op(box: Sandbox) -> None:
+    result = box.run(**BOTH, **CONNECT)
+    assert result.stdout == "claude\n"
+    assert result.stderr == "hub-session: using env\n"
+
+
+def test_one_variable_alone_is_not_env(box: Sandbox) -> None:
+    result = box.run(MASSIVE_API_KEY="placeholder-a", **CONNECT)
+    assert result.stderr == "hub-session: using connect\n"
+    result = box.run(MASSIVE_API_KEY="placeholder-a", IC_API_TOKEN="")
+    assert result.stderr == "hub-session: using op\n"
+
+
+def test_connect_mode_execs_resolver_with_env_file(box: Sandbox) -> None:
+    result = box.run("-p", "hi", **CONNECT)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "op-resolve [--env-file] [.env.local] [--] [claude] [-p] [hi]\n"
+    assert result.stderr == "hub-session: using connect\n"
+
+
+def test_connect_wins_over_op(box: Sandbox) -> None:
+    result = box.run(**CONNECT)
+    assert result.stdout.startswith("op-resolve ")
+    assert result.stderr == "hub-session: using connect\n"
+
+
+def test_op_mode_execs_op_run_with_env_file(box: Sandbox) -> None:
+    result = box.run("-p", "hi")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "op [run] [--env-file] [.env.local] [--] [claude] [-p] [hi]\n"
+    assert result.stderr == "hub-session: using op\n"
+
+
+def test_no_path_exits_2_with_one_line(tmp_path: Path) -> None:
+    box = Sandbox(tmp_path, with_op=False, with_env_local=True)
+    result = box.run()
     assert result.returncode == 2
-    assert result.stderr.strip() == MSG
+    assert result.stdout == ""
+    assert result.stderr == NO_PATH_MSG + "\n"
 
 
-def test_empty_connect_host_is_rejected() -> None:
-    result = _run(SCRIPT, _env(OP_CONNECT_HOST=""))
+def test_override_beats_detection(box: Sandbox) -> None:
+    result = box.run(HUB_SESSION_MODE="op", **BOTH, **CONNECT)
+    assert result.stdout.startswith("op [run]")
+    assert result.stderr == "hub-session: using op\n"
+    result = box.run(HUB_SESSION_MODE="connect", **BOTH)
+    assert result.stdout.startswith("op-resolve ")
+    result = box.run(HUB_SESSION_MODE="env", **CONNECT)
+    assert result.stdout == "claude\n"
+
+
+def test_unknown_mode_exits_2_with_one_line(box: Sandbox) -> None:
+    result = box.run(HUB_SESSION_MODE="bogus", **BOTH)
     assert result.returncode == 2
-    assert MSG in result.stderr
+    assert result.stdout == ""
+    assert result.stderr == (
+        "hub-session: HUB_SESSION_MODE must be connect, op or env (see README § Massive)\n"
+    )
 
 
-def test_missing_env_local_exits_2_before_exec(tmp_path: Path) -> None:
-    (tmp_path / "scripts").mkdir()
-    copy = tmp_path / "scripts" / "hub-session.sh"
-    shutil.copy(SCRIPT, copy)
-    result = _run(copy, _env(OP_CONNECT_HOST="http://<connect-host>:8090", HOME=str(tmp_path)))
+@pytest.mark.parametrize(
+    ("extra", "mode"), [(CONNECT, "connect"), ({}, "op")], ids=["connect", "op"]
+)
+def test_missing_env_local_exits_2_before_exec(
+    tmp_path: Path, extra: dict[str, str], mode: str
+) -> None:
+    box = Sandbox(tmp_path, with_op=True, with_env_local=False)
+    result = box.run(**extra)
     assert result.returncode == 2
-    assert ".env.local is missing" in result.stderr
-    assert len(result.stderr.strip().splitlines()) == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "hub-session: .env.local is missing; copy .env.example to .env.local "
+        "(see README § Massive)\n"
+    )
+
+
+def test_env_mode_skips_env_local_check(tmp_path: Path) -> None:
+    box = Sandbox(tmp_path, with_op=False, with_env_local=False)
+    result = box.run(**BOTH)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "claude\n"
+    assert result.stderr == "hub-session: using env\n"
