@@ -1,1 +1,14 @@
-{"hooks": {}}
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(hub session-open || python3 -m hub session-open) 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

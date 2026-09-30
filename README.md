@@ -8,7 +8,7 @@ out what new information means for that book, and decides when something deserve
 This repo is machinery only. Personal data lives in a local SQLite database and gitignored local
 files and is never committed. See [ROADMAP.md](ROADMAP.md) for the architecture and phases.
 
-**Status:** early. The `hub` command line exists and every subcommand is a stub that exits 2.
+**Status:** early. Every `hub` subcommand in the first milestone is implemented: the store and its backups, the claude.ai import, the IC pack client and the session-open status block.
 
 ## Quick start
 
