@@ -52,9 +52,15 @@ One-time setup:
 
 ```bash
 brew install uv                  # macOS; the dotfiles Brewfile lists it
-uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"
+uv tool install --with 'mcp<2' "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"
 cp .mcp.json.example .mcp.json   # local-only, gitignored
 cp .env.example .env.local       # local-only, gitignored; holds 1Password references, not keys
+```
+
+The `--with 'mcp<2'` pin is required because mcp_massive 0.10.0 imports `mcp.server.fastmcp`, which mcp 2.x renamed, so an unpinned install dies at start and Claude Code reports `CONNECTION_CLOSED`. If already installed unpinned, re-install with:
+
+```bash
+uv tool install --force --with 'mcp<2' "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"
 ```
 
 Export the 1Password Connect URL (placeholder shown) and start Claude Code through the launcher.
