@@ -38,11 +38,16 @@ hub db init                # create data/hub.db and apply migrations (safe to re
 hub db migrate             # apply pending migrations to an existing database
 hub db backup              # online backup into backups/, integrity-checked, keeps newest 7
 hub db restore-check FILE  # verify a backup against the live store; non-zero on FAIL
+hub import claude-export DIR [--apply]  # claude.ai export as revision-1 documents; dry run by default
 ```
 
 `hub db init|migrate|backup` take `--db PATH` (default `data/hub.db`) and `backup` takes
 `--backup-dir PATH` (default `backups/`); defaults are relative to the current directory, so run
-them from the repo root. They exit 1 with one line on stderr on failure. The other subcommands
+them from the repo root. They exit 1 with one line on stderr on failure.
+`hub import claude-export` reads top-level `*.md` and `knowledge/*.md` (skipping the two IC
+contract docs), keys each document by its relative path, and only adds documents not yet
+stored, so re-running changes nothing; a file whose content changed is reported, never
+re-imported. Its default is a dry run that writes nothing. The other subcommands
 are still stubs: they print "not implemented" to stderr and exit 2. Once implemented,
 `hub ic pull` calls the live IC API.
 
@@ -50,6 +55,7 @@ are still stubs: they print "not implemented" to stderr and exit 2. Once impleme
 
 ```text
 hub/cli.py       argparse entry point; one function per subcommand
+hub/importer.py  claude.ai export reader behind `hub import claude-export`
 hub/store.py     SQLite connection, migrations, document revisions, backups
 hub/restore.py   backup restore check (integrity, tables, row counts)
 hub/migrations/  numbered SQL migrations (NNNN_name.sql), shipped as package data
