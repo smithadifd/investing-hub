@@ -3,6 +3,7 @@
 Canonical, tool-agnostic and self-contained. `CLAUDE.md` imports this file; don't duplicate it there.
 
 Backup posture: nightly `hub db backup` (the online `sqlite3` `.backup` API, integrity-checked, newest 7 kept, so 7-day retention) of `data/hub.db` into `backups/`, plus the Time Machine layer that picks up `backups/`; GitHub holds only code, never data. The nightly schedule lives on the always-on Mac, outside this repo.
+Restore procedure: run `hub db restore-check backups/<file>` (integrity, table list, row counts and newest revision against `data/hub.db`; exit 0 is PASS, a lagging backup is WARN, never a failure). To restore, stop anything using the store, copy the backup over `data/hub.db` and remove `data/hub.db-wal` and `data/hub.db-shm`.
 
 ## What Investing Hub is
 
@@ -36,6 +37,7 @@ pytest                     # tests (synthetic data only)
 hub db init                # create data/hub.db and apply migrations (safe to re-run)
 hub db migrate             # apply pending migrations to an existing database
 hub db backup              # online backup into backups/, integrity-checked, keeps newest 7
+hub db restore-check FILE  # verify a backup against the live store; non-zero on FAIL
 ```
 
 `hub db init|migrate|backup` take `--db PATH` (default `data/hub.db`) and `backup` takes
@@ -49,6 +51,7 @@ are still stubs: they print "not implemented" to stderr and exit 2. Once impleme
 ```text
 hub/cli.py       argparse entry point; one function per subcommand
 hub/store.py     SQLite connection, migrations, document revisions, backups
+hub/restore.py   backup restore check (integrity, tables, row counts)
 hub/migrations/  numbered SQL migrations (NNNN_name.sql), shipped as package data
 hub/__main__.py  python -m hub
 tests/           pytest suite
