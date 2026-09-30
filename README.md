@@ -22,7 +22,7 @@ hub --help
 
 | Command | Purpose |
 |---|---|
-| `hub db init` / `migrate` / `backup` / `restore-check` | Local database lifecycle and backups |
+| `hub db init` / `migrate` / `backup` / `restore-check` | Local database lifecycle and backups (`restore-check` defaults to the newest backup) |
 | `hub import claude-export` | Import a claude.ai export as document revisions |
 | `hub ic pull` / `docs` | Read the Investing Companion context pack and contract docs |
 | `scripts/hub-session.sh` | Start Claude Code with `MASSIVE_API_KEY` and `IC_API_TOKEN` resolved from `.env.local` (needs `OP_CONNECT_HOST`) |

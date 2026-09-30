@@ -30,8 +30,13 @@ def _backup_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _restore_check_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("backup", type=Path, help="backup file to verify (e.g. backups/hub-*.db)")
-    _db_path_arg(parser)
+    parser.add_argument(
+        "backup",
+        type=Path,
+        nargs="?",
+        help="backup file to verify (default: the newest hub-*.db in --backup-dir)",
+    )
+    _backup_args(parser)
 
 
 def _fail(name: str, exc: Exception | str) -> int:
@@ -78,6 +83,12 @@ def cmd_db_backup(args: argparse.Namespace) -> int:
 
 def cmd_db_restore_check(args: argparse.Namespace) -> int:
     name = "db restore-check"
+    if args.backup is None:
+        backups = store.list_backups(args.backup_dir)
+        if not backups:
+            return _fail(name, f"no backups found in {args.backup_dir}")
+        args.backup = backups[-1]
+        print(f"hub {name}: using {args.backup}")
     if not args.backup.is_file():
         return _fail(name, f"backup not found: {args.backup}")
     if not args.db.is_file():

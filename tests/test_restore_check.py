@@ -1,4 +1,5 @@
 import hashlib
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -268,3 +269,47 @@ def test_live_path_with_space_hash_and_question_mark(tmp_path, capsys):
     assert code == 0, out
     assert err == ""
     assert "backup 6, live 6" in out
+
+
+def _stamped_backups(live, backup_dir):
+    # Names ascend oldest -> newest; mtimes are set in the opposite order.
+    backup_dir.mkdir()
+    names = ["hub-20260101T000000000001Z.db", "hub-20260102T000000000001Z.db"]
+    names.append("hub-20260103T000000000001Z.db")
+    paths = []
+    for i, name in enumerate(names):
+        path = backup_dir / name
+        shutil.copy(live, path)
+        os.utime(path, (1_000_000 + (len(names) - i) * 100,) * 2)
+        paths.append(path)
+    return paths
+
+
+def test_default_picks_newest_backup_by_name(live, tmp_path, capsys):
+    bdir = tmp_path / "bk"
+    paths = _stamped_backups(live, bdir)
+    code = main(["db", "restore-check", "--db", str(live), "--backup-dir", str(bdir)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.splitlines()[0] == f"hub db restore-check: using {paths[2]}"
+
+
+def test_default_with_no_backups_exits_1(live, tmp_path, capsys):
+    bdir = tmp_path / "empty"
+    bdir.mkdir()
+    code = main(["db", "restore-check", "--db", str(live), "--backup-dir", str(bdir)])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert f"hub db restore-check: no backups found in {bdir}" in captured.err
+
+
+def test_explicit_path_wins_over_newer_backup(live, tmp_path, capsys):
+    bdir = tmp_path / "bk"
+    paths = _stamped_backups(live, bdir)
+    code = main(
+        ["db", "restore-check", str(paths[0]), "--db", str(live), "--backup-dir", str(bdir)]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "using" not in out
+    assert str(paths[2]) not in out
