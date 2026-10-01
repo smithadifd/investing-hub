@@ -162,6 +162,39 @@ def test_revise_new_slug_without_kind_refused(db, tmp_path, capsys):
         conn.close()
 
 
+@pytest.mark.parametrize("flag", [("--kind", "other"), ("--title", "Other Title")])
+def test_revise_existing_slug_refuses_kind_and_title(db, tmp_path, capsys, flag):
+    _seed(db)
+    body = tmp_path / "new.md"
+    body.write_text("third body\n")
+    capsys.readouterr()
+    assert _revise(db, "alpha-note", body, *flag) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "hub doc revise: alpha-note exists; --kind/--title apply to a new document only"
+    ]
+    conn = store.connect(db)
+    try:
+        assert store.get_document_revision(conn, "alpha-note")["revision"] == 2
+        row = conn.execute("SELECT kind, title FROM documents").fetchone()
+    finally:
+        conn.close()
+    assert (row["kind"], row["title"]) == ("note", "Alpha Title")
+
+
+def test_revise_missing_database_beats_empty_body(tmp_path, capsys):
+    missing = tmp_path / "none.db"
+    body = tmp_path / "empty.md"
+    body.write_text("")
+    assert _revise(missing, "alpha-note", body) == 1
+    err = capsys.readouterr().err
+    assert len(err.splitlines()) == 1
+    assert "database not found" in err
+    assert "empty body" not in err
+    assert not missing.exists()
+
+
 def test_revise_unknown_body_file_exit_1(db, tmp_path, capsys):
     _seed(db)
     capsys.readouterr()

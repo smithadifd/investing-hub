@@ -308,14 +308,20 @@ def parse(
     rows = _read_rows(text)
     best: tuple[int, dict[str, int], list[str]] | None = None
     best_score = 0
+    densest, densest_cells = 0, 0
     for index, row in enumerate(rows[:MAX_HEADER_SCAN_ROWS]):
         mapping, _ = _map_row(kind, row, norm_overrides)
         score = len(mapping)
         if score > best_score:
             best, best_score = (index, mapping, row), score
+        filled = sum(1 for cell in row if cell.strip())
+        if filled > densest_cells:
+            densest, densest_cells = index, filled
     if best is None:
-        first_nonempty = next((row for row in rows if any(cell.strip() for cell in row)), [])
-        headers_found = ", ".join(first_nonempty)
+        candidate = rows[densest] if densest_cells else []
+        headers_found = ", ".join(candidate)
+        if densest_cells:
+            headers_found += f" (line {densest + 1})"
         raise CustodianError(
             f"no header row found in the first {MAX_HEADER_SCAN_ROWS} rows"
             f" ({kind} need {', '.join(REQUIRED[kind])} columns);"

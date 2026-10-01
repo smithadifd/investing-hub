@@ -308,16 +308,20 @@ def cmd_doc_revise(args: argparse.Namespace) -> int:
         body = args.body_file.read_text() if args.body_file else sys.stdin.read()
     except (OSError, UnicodeDecodeError) as exc:
         return _fail(name, exc)
-    if not body.strip():
-        return _fail(name, "empty body refused")
     try:
         conn = _open_existing(name, args.db)
         if isinstance(conn, int):
             return conn
         try:
+            if not body.strip():
+                return _fail(name, "empty body refused")
             exists = conn.execute("SELECT 1 FROM documents WHERE slug = ?", (args.slug,)).fetchone()
             if exists is None and args.kind is None:
                 return _fail(name, f"new document {args.slug}: --kind is required")
+            if exists is not None and (args.kind is not None or args.title is not None):
+                return _fail(
+                    name, f"{args.slug} exists; --kind/--title apply to a new document only"
+                )
             revision = store.insert_document_revision(
                 conn,
                 slug=args.slug,

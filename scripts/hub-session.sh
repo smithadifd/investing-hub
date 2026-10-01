@@ -38,6 +38,29 @@ if [ "$mode" != env ] && [ ! -f .env.local ]; then
   exit 2
 fi
 
+if [ -n "${HUB_SESSION_MODE:-}" ]; then
+  case "$mode" in
+    op)
+      if ! command -v op >/dev/null 2>&1; then
+        echo "hub-session: HUB_SESSION_MODE=op but the 1Password CLI op is not on PATH" >&2
+        exit 2
+      fi
+      ;;
+    connect)
+      if [ ! -e "$HOME/.claude/scripts/op-resolve.py" ]; then
+        echo "hub-session: HUB_SESSION_MODE=connect but $HOME/.claude/scripts/op-resolve.py is missing" >&2
+        exit 2
+      fi
+      ;;
+    env)
+      if [ -z "${MASSIVE_API_KEY:-}" ] || [ -z "${IC_API_TOKEN:-}" ]; then
+        echo "hub-session: HUB_SESSION_MODE=env needs MASSIVE_API_KEY and IC_API_TOKEN both non-empty" >&2
+        exit 2
+      fi
+      ;;
+  esac
+fi
+
 echo "hub-session: using $mode" >&2
 
 case "$mode" in

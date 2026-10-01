@@ -67,7 +67,7 @@ and reuses stored mappings when counting rows (ignoring trailing summary, total 
 Drop layout: README "Custodian exports".
 
 `hub doc list|show|revise` take `--db PATH`. `revise` appends a revision with `source_kind = session`
-and prints `<slug> revision N (session)`; creating a new slug needs `--kind`, and an empty body
+and prints `<slug> revision N (session)`; creating a new slug needs `--kind` (and `--kind`/`--title` on an existing slug are refused), and an empty body
 is refused. Unknown slugs or revisions and other failures exit 1 with one line on stderr.
 
 `hub session-open` (`--db PATH`, `--stale-days N`) prints one status block: pack age and

@@ -149,6 +149,15 @@ def test_no_recognized_header_reports_first_nonempty_cells_and_map_form():
     assert "--map 'header=field'" in message
 
 
+def test_no_recognized_header_names_best_candidate_row_not_the_preamble_title():
+    text = "Account Export\n\nCustomTicker,CustomUnits,CustomValue\nTEST1,10,50\n"
+    with pytest.raises(custodian.CustodianError) as caught:
+        custodian.parse(text, "positions")
+    message = str(caught.value)
+    assert "headers found: CustomTicker, CustomUnits, CustomValue (line 3)" in message
+    assert "Account Export" not in message
+
+
 def test_newest_date_uses_first_date_of_an_as_of_cell():
     parsed = custodian.parse(TRANSACTIONS, "transactions")
     assert parsed.dates == ["2026-01-02", "2026-01-09"]

@@ -124,8 +124,40 @@ def test_override_beats_detection(box: Sandbox) -> None:
     assert result.stderr == "hub-session: using op\n"
     result = box.run(HUB_SESSION_MODE="connect", **BOTH)
     assert result.stdout.startswith("op-resolve ")
-    result = box.run(HUB_SESSION_MODE="env", **CONNECT)
+    result = box.run(HUB_SESSION_MODE="env", **BOTH, **CONNECT)
     assert result.stdout == "claude\n"
+
+
+def test_forced_op_without_op_on_path_exits_2_before_exec(tmp_path: Path) -> None:
+    box = Sandbox(tmp_path, with_op=False, with_env_local=True)
+    result = box.run(HUB_SESSION_MODE="op")
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == (
+        "hub-session: HUB_SESSION_MODE=op but the 1Password CLI op is not on PATH\n"
+    )
+
+
+def test_forced_connect_without_resolver_exits_2_before_exec(box: Sandbox) -> None:
+    (box.home / ".claude" / "scripts" / "op-resolve.py").unlink()
+    result = box.run(HUB_SESSION_MODE="connect", **CONNECT)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"hub-session: HUB_SESSION_MODE=connect but {box.home}/.claude/scripts/op-resolve.py "
+        "is missing\n"
+    )
+
+
+def test_forced_env_with_one_variable_exits_2_before_exec(box: Sandbox) -> None:
+    for present in BOTH:
+        result = box.run(HUB_SESSION_MODE="env", **{present: BOTH[present]})
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert result.stderr == (
+            "hub-session: HUB_SESSION_MODE=env needs MASSIVE_API_KEY and IC_API_TOKEN "
+            "both non-empty\n"
+        )
 
 
 def test_unknown_mode_exits_2_with_one_line(box: Sandbox) -> None:
