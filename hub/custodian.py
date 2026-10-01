@@ -278,9 +278,17 @@ def _map_row(
 
 def _is_summary_symbol(value: str) -> bool:
     normalized = " ".join(value.strip().lower().split())
-    return normalized.endswith(" total") or normalized.startswith(
-        ("total", "subtotal", "grand total", "summary")
-    )
+    if normalized.endswith(" total"):
+        return True
+    labels = ("total", "subtotal", "grand total", "account total", "summary")
+    for label in labels:
+        if normalized == label:
+            return True
+        if normalized.startswith(label):
+            boundary = normalized[len(label) : len(label) + 1]
+            if boundary == " " or (boundary and not boundary.isalnum()):
+                return True
+    return False
 
 
 def parse(

@@ -498,6 +498,23 @@ def test_summary_rows_ignored_without_excluding_ticker_prefixes():
     assert len(parsed_nums.rows) == 3
 
 
+def test_summary_labels_require_a_token_boundary():
+    text = (
+        "Ticker,Shares\n"
+        "TOTAL1,10\n"
+        "SUMMARYCO,20\n"
+        "SUBTOTALITY,30\n"
+        "TOTL,40\n"
+        "Total,50\n"
+        "Grand Total,60\n"
+        "Account Total:,70\n"
+        "Subtotal:,80\n"
+        "Cash Total,90\n"
+    )
+    parsed = custodian.parse(text, "positions", {"Shares": "quantity"})
+    assert [row[0] for row in parsed.rows] == ["TOTAL1", "SUMMARYCO", "SUBTOTALITY", "TOTL"]
+
+
 def test_non_numeric_quantity_row_ignored():
     text = "Ticker,Shares\nTEST1,10\nNote,see footnote\nTEST2,20\n"
     parsed = custodian.parse(text, "positions", {"Shares": "quantity"})
