@@ -41,6 +41,9 @@ import/custodians/<custodian>/<YYYY-MM-DD>/<account-label>/transactions.csv
 import/custodians/<custodian>/<YYYY-MM-DD>/<account-label>/statement.pdf
 ```
 
+The `<account-label>` folder becomes the snapshot's account (pass `--account` to set it by hand),
+so `hub custodian list` tells several accounts at one custodian apart.
+
 Run it without `--apply` first to see how the headers map and how many rows were found; pass
 `--map "Header As Written=field"` for any column it does not recognise. Overrides are persisted
 with the snapshot so `hub custodian list` reuses them when counting data rows.

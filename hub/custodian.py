@@ -12,7 +12,7 @@ import io
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 KINDS = ("positions", "transactions")
 
@@ -221,6 +221,18 @@ def source_ref(path: Path, root: Path | None = None) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return str(path)
+
+
+def account_from_ref(ref: str) -> str | None:
+    """The `<account-label>` folder of a drop-layout path, else None.
+
+    The drop layout is `.../<custodian>/<YYYY-MM-DD>/<account-label>/<file>`, so the label
+    is the file's parent folder when the folder above it is an ISO date.
+    """
+    parts = PurePosixPath(ref.replace("\\", "/")).parts
+    if len(parts) >= 3 and _ISO_DATE.match(parts[-3]):
+        return parts[-2]
+    return None
 
 
 @dataclass
