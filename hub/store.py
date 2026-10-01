@@ -262,9 +262,21 @@ def list_backups(backup_dir: Path) -> list[Path]:
 
 
 def prune_backups(backup_dir: Path, keep: int = BACKUP_KEEP) -> list[Path]:
-    """Delete all but the newest `keep` backups; return the paths removed."""
-    backups = list_backups(backup_dir)
-    doomed = backups[:-keep] if keep > 0 else backups
+    """Keep backups from the newest `keep` UTC days; return the paths removed.
+
+    The newest day keeps every copy (so same-day manual backups survive); each older kept day
+    keeps only its newest copy. Retention counts days, so extra same-day backups never push an
+    older day out of the window.
+    """
+    by_day: dict[str, list[Path]] = {}
+    for path in list_backups(backup_dir):
+        by_day.setdefault(path.name[4:12], []).append(path)
+    days = sorted(by_day, reverse=True)
+    kept: set[Path] = set()
+    if keep > 0 and days:
+        kept.update(by_day[days[0]])
+        kept.update(by_day[day][-1] for day in days[1:keep])
+    doomed = [p for day in sorted(by_day) for p in by_day[day] if p not in kept]
     for path in doomed:
         path.unlink()
     return doomed

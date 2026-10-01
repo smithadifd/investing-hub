@@ -205,6 +205,35 @@ def test_backup_retention_keeps_newest_seven(conn, db_path, tmp_path):
     assert unrelated.exists()
 
 
+def test_backup_retention_counts_days_not_copies(conn, db_path, tmp_path):
+    backups = tmp_path / "backups"
+    daily = [store.backup(db_path, backups, now=T0 + timedelta(days=day)).path for day in range(6)]
+    last_day = T0 + timedelta(days=6)
+    same_day = [
+        store.backup(db_path, backups, now=last_day + timedelta(hours=h)).path for h in range(4)
+    ]
+    assert store.list_backups(backups) == daily + same_day
+
+
+def test_backup_retention_trims_an_older_day_to_its_newest_copy(conn, db_path, tmp_path):
+    backups = tmp_path / "backups"
+    morning = store.backup(db_path, backups, now=T0).path
+    evening = store.backup(db_path, backups, now=T0 + timedelta(hours=10)).path
+    result = store.backup(db_path, backups, now=T0 + timedelta(days=1))
+    assert result.pruned == [morning]
+    assert store.list_backups(backups) == [evening, result.path]
+
+
+def test_backup_retention_drops_days_beyond_the_window(conn, db_path, tmp_path):
+    backups = tmp_path / "backups"
+    first_day = [store.backup(db_path, backups, now=T0 + timedelta(hours=h)).path for h in range(2)]
+    for day in range(1, 8):
+        store.backup(db_path, backups, now=T0 + timedelta(days=day))
+    remaining = store.list_backups(backups)
+    assert len(remaining) == 7
+    assert not set(first_day) & set(remaining)
+
+
 def test_integrity_check_runs_on_the_copy(conn, db_path, tmp_path, monkeypatch):
     backups = tmp_path / "backups"
     checked = []

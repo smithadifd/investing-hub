@@ -2,7 +2,7 @@
 
 Canonical, tool-agnostic and self-contained. `CLAUDE.md` imports this file; don't duplicate it there.
 
-Backup posture: nightly `hub db backup` (the online `sqlite3` `.backup` API, integrity-checked, newest 7 kept, so 7-day retention) of `data/hub.db` into `backups/`, plus the Time Machine layer that picks up `backups/`; GitHub holds only code, never data. The nightly schedule lives on the always-on Mac, outside this repo.
+Backup posture: nightly `hub db backup` (the online `sqlite3` `.backup` API, integrity-checked, 7-day retention: the newest copy of each of the last 7 backup days, plus every copy from the newest day) of `data/hub.db` into `backups/`, plus the Time Machine layer that picks up `backups/`; GitHub holds only code, never data. The nightly schedule lives on the always-on Mac, outside this repo.
 Restore procedure: run `hub db restore-check [backups/<file>]` (defaults to the newest backup; integrity, table list, row counts and newest revision against `data/hub.db`; exit 0 is PASS, a lagging backup is WARN, never a failure). To restore, stop anything using the store, copy the backup over `data/hub.db` and remove `data/hub.db-wal` and `data/hub.db-shm`.
 
 ## What Investing Hub is
@@ -36,7 +36,7 @@ ruff format --check .      # format check
 pytest                     # tests (synthetic data only)
 hub db init                # create data/hub.db and apply migrations (safe to re-run)
 hub db migrate             # apply pending migrations to an existing database
-hub db backup              # online backup into backups/, integrity-checked, keeps newest 7
+hub db backup              # online backup into backups/, integrity-checked, keeps the last 7 backup days
 hub db restore-check [FILE]  # verify a backup (default: newest) against the live store; non-zero on FAIL
 hub import claude-export DIR [--apply]  # claude.ai export as revision-1 documents; dry run by default
 hub doc list [--titles]    # documents with latest revision, source and time; titles hidden unless asked
