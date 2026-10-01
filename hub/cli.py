@@ -208,8 +208,9 @@ def cmd_ic_show(args: argparse.Namespace) -> int:
     try:
         meta_text = meta_path.read_text(encoding="utf-8")
         pack_text = pack_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return _fail(name, f"cannot read pack: {exc.strerror} (run `hub ic pull`)")
+    except (OSError, UnicodeError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        return _fail(name, f"cannot read pack: {reason} (run `hub ic pull`)")
 
     try:
         meta = json.loads(meta_text)

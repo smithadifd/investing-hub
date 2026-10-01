@@ -605,6 +605,8 @@ SYNTHETIC_SHOW_PACK = {
     "generated_at": "2026-01-02T03:04:05Z",
     "portfolio_value": "123456.78",
     "total_invested": "98765.43",
+    "unknown_scalar_sentinel": "SENTINEL_SCALAR_VALUE",
+    "unknown_scalar_number": 777777,
     "positions": [
         {"symbol": "AAA", "account": "Taxable", "quantity": "100", "current_value": "50000"},
         {"symbol": "BBB", "account": "IRA", "quantity": "200", "current_value": "73456.78"},
@@ -662,15 +664,23 @@ def _write_cached_pack(root, pack=SYNTHETIC_SHOW_PACK, meta=SYNTHETIC_SHOW_META)
     pack_dir = root / "data" / "ic"
     pack_dir.mkdir(parents=True, exist_ok=True)
     if pack is not None:
-        (pack_dir / "pack-latest.json").write_text(
-            json.dumps(pack) if isinstance(pack, (dict, list)) else str(pack),
-            encoding="utf-8",
-        )
+        target = pack_dir / "pack-latest.json"
+        if isinstance(pack, bytes):
+            target.write_bytes(pack)
+        else:
+            target.write_text(
+                json.dumps(pack) if isinstance(pack, (dict, list)) else str(pack),
+                encoding="utf-8",
+            )
     if meta is not None:
-        (pack_dir / "pack-meta.json").write_text(
-            json.dumps(meta) if isinstance(meta, (dict, list)) else str(meta),
-            encoding="utf-8",
-        )
+        target = pack_dir / "pack-meta.json"
+        if isinstance(meta, bytes):
+            target.write_bytes(meta)
+        else:
+            target.write_text(
+                json.dumps(meta) if isinstance(meta, (dict, list)) else str(meta),
+                encoding="utf-8",
+            )
 
 
 def _collect_leaf_strings_and_numbers(data):
@@ -691,6 +701,12 @@ def test_show_cached_pack_counts(env, capsys):
     assert main(["ic", "show"]) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
+    # Assert that no symbol, number or string from any pack item appears in stdout
+    # Also assert unknown top-level scalars and portfolio figures are absent from stdout
+    assert "SENTINEL_SCALAR_VALUE" not in captured.out
+    assert "777777" not in captured.out
+    assert "123456.78" not in captured.out
+    assert "98765.43" not in captured.out
     lines = captured.out.strip().split("\n")
 
     assert lines[0] == (
@@ -714,10 +730,6 @@ def test_show_cached_pack_counts(env, capsys):
     ]
     assert lines[1:] == expected_sections
 
-    # Assert that no symbol, number or string from any pack item appears in stdout
-    # Also assert neither scalar value appears in stdout
-    assert "123456.78" not in captured.out
-    assert "98765.43" not in captured.out
     for key, value in SYNTHETIC_SHOW_PACK.items():
         if isinstance(value, list):
             for item in value:
@@ -773,6 +785,22 @@ def test_show_missing_pack_exits_1(env, capsys, pack_val, meta_val):
     ],
 )
 def test_show_invalid_json_exits_1(env, capsys, pack_content, meta_content):
+    _write_cached_pack(env, pack=pack_content, meta=meta_content)
+    assert main(["ic", "show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "hub ic pull" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("pack_content", "meta_content"),
+    [
+        (b"\xff\xfe\x00", SYNTHETIC_SHOW_META),
+        (SYNTHETIC_SHOW_PACK, b"\xff\xfe\x00"),
+    ],
+)
+def test_show_undecodable_utf8_exits_1(env, capsys, pack_content, meta_content):
     _write_cached_pack(env, pack=pack_content, meta=meta_content)
     assert main(["ic", "show"]) == 1
     captured = capsys.readouterr()
