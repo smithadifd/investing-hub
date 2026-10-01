@@ -10,6 +10,7 @@ SURFACE_COMMANDS = [
     "import claude-export",
     "ic pull",
     "ic docs",
+    "ic show",
     "doc list",
     "doc show",
     "doc revise",

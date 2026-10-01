@@ -197,6 +197,49 @@ def cmd_ic_docs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ic_show(args: argparse.Namespace) -> int:
+    name = "ic show"
+    meta_path = ic.PACK_DIR / ic.META_FILE
+    pack_path = ic.PACK_DIR / ic.PACK_FILE
+    if not meta_path.is_file():
+        return _fail(name, f"pack metadata not found: {meta_path} (run `hub ic pull`)")
+    if not pack_path.is_file():
+        return _fail(name, f"pack not found: {pack_path} (run `hub ic pull`)")
+    try:
+        meta_text = meta_path.read_text(encoding="utf-8")
+        pack_text = pack_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _fail(name, f"cannot read pack: {exc.strerror} (run `hub ic pull`)")
+
+    try:
+        meta = json.loads(meta_text)
+        pack = json.loads(pack_text)
+    except ValueError:
+        return _fail(name, "invalid JSON in cached pack (run `hub ic pull`)")
+
+    if not isinstance(meta, dict):
+        return _fail(name, "pack metadata is not a JSON object (run `hub ic pull`)")
+    if not isinstance(pack, dict):
+        return _fail(name, "pack is not a JSON object")
+
+    try:
+        header = (
+            f"schema {meta['schema_version']}, advisor-actions {meta['advisor_actions_version']},"
+            f" generated {meta['generated_at']}, fetched {meta['fetched_at']}"
+        )
+    except KeyError as exc:
+        return _fail(name, f"pack metadata missing {exc} (run `hub ic pull`)")
+
+    print(header)
+    for key, value in pack.items():
+        if key != "trade_summary" and isinstance(value, list):
+            print(f"{key}: {len(value)}")
+
+    trade_summary = "present" if pack.get("trade_summary") is not None else "absent"
+    print(f"trade_summary: {trade_summary}")
+    return 0
+
+
 def _non_negative_int(text: str) -> int:
     try:
         value = int(text)
@@ -481,6 +524,7 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
     "ic": {
         "pull": ("fetch the Investing Companion context pack", cmd_ic_pull),
         "docs": ("show Investing Companion's contract docs", cmd_ic_docs),
+        "show": ("show counts from the cached context pack", cmd_ic_show),
     },
     "doc": {
         "list": ("list documents with their latest revision", cmd_doc_list),
@@ -507,6 +551,14 @@ def _import_args(parser: argparse.ArgumentParser) -> None:
     mode.add_argument("--apply", action="store_true", help="write the new documents")
 
 
+def _ic_show_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--counts",
+        action="store_true",
+        help="print section counts (default)",
+    )
+
+
 # Full command name -> function adding that command's arguments to its parser.
 ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db init": _db_path_arg,
@@ -514,6 +566,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db backup": _backup_args,
     "db restore-check": _restore_check_args,
     "import claude-export": _import_args,
+    "ic show": _ic_show_args,
     "doc list": _doc_list_args,
     "doc show": _doc_show_args,
     "doc revise": _doc_revise_args,

@@ -44,6 +44,7 @@ hub doc show SLUG [--revision N]  # print one revision's body (default latest)
 hub doc revise SLUG --source-ref HANDLE [--body-file F] [--kind K] [--title T]  # append a session revision; body from F or stdin
 hub custodian import FILE --custodian NAME --kind positions|transactions [--as-of D] [--map H=F ...] [--apply]  # one CSV -> one custodian_snapshots row; dry run by default
 hub custodian list         # snapshots: custodian, kind, as_of, imported_at, row count
+hub ic show [--counts]     # counts-only view of the cached context pack
 hub session-open           # print the session status block; always exits 0, read-only
 ```
 
