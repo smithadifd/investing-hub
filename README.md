@@ -27,8 +27,23 @@ hub --help
 | `hub ic pull` / `docs` | Read the Investing Companion context pack and contract docs |
 | `scripts/hub-session.sh` | Start Claude Code with `MASSIVE_API_KEY` and `IC_API_TOKEN` resolved from `.env.local` (needs `OP_CONNECT_HOST`) |
 | `hub doc list` / `show` / `revise` | List documents, print any revision of one, and append a session revision (`revise` needs `--source-ref`; a new slug needs `--kind`) |
+| `hub custodian import` / `list` | Import a custodian positions or transactions CSV as one snapshot (dry run by default; `--apply` writes) and list the snapshots |
 | `hub session-open` | Checks run when an advisor session opens |
 
+### Custodian exports
+
+`hub custodian import` reads CSV exports only; PDF statements are not parsed. Keep the files
+under the git-ignored `import/` directory, one folder per custodian, date and account:
+
+```text
+import/custodians/<custodian>/<YYYY-MM-DD>/<account-label>/positions.csv
+import/custodians/<custodian>/<YYYY-MM-DD>/<account-label>/transactions.csv
+import/custodians/<custodian>/<YYYY-MM-DD>/<account-label>/statement.pdf
+```
+
+Run it without `--apply` first to see how the headers map and how many rows were found; pass
+`--map "Header As Written=field"` for any column it does not recognise. Overrides are persisted
+with the snapshot so `hub custodian list` reuses them when counting data rows.
 ## Onboarding
 
 The [onboarding kit](docs/onboarding/README.md) is a fill-in-the-blanks scaffold for standing up your

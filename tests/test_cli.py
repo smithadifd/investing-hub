@@ -13,6 +13,8 @@ SURFACE_COMMANDS = [
     "doc list",
     "doc show",
     "doc revise",
+    "custodian import",
+    "custodian list",
     "session-open",
 ]
 

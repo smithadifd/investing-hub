@@ -1,13 +1,14 @@
 """Command-line entry point."""
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from hub import ic, importer, restore, session_open, store
+from hub import custodian, ic, importer, restore, session_open, store
 
 
 def _db_path_arg(parser: argparse.ArgumentParser) -> None:
@@ -334,6 +335,131 @@ def cmd_doc_revise(args: argparse.Namespace) -> int:
     return 0
 
 
+def _custodian_import_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument("file", type=Path, help="CSV file to read")
+    parser.add_argument("--custodian", required=True, help="custodian name, e.g. a broker label")
+    parser.add_argument("--kind", required=True, choices=custodian.KINDS, help="file contents")
+    parser.add_argument(
+        "--as-of",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="snapshot date (default: the newest date in the file's date column)",
+    )
+    parser.add_argument(
+        "--map",
+        action="append",
+        default=[],
+        metavar="HEADER=FIELD",
+        help="map a header to a field by hand (repeatable)",
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="write the snapshot (default: dry run)"
+    )
+
+
+def cmd_custodian_import(args: argparse.Namespace) -> int:
+    name = "custodian import"
+    if args.file.suffix.lower() != ".csv":
+        return _fail(
+            name, f"{args.file}: only .csv files are imported (PDF statements are not parsed)"
+        )
+    try:
+        overrides = custodian.normalize_overrides(args.map, kind=args.kind)
+        as_of_arg = custodian.parse_as_of(args.as_of) if args.as_of else None
+        raw = args.file.read_bytes().decode("utf-8-sig")
+        parsed = custodian.parse(raw, args.kind, overrides)
+    except (custodian.CustodianError, OSError, UnicodeDecodeError) as exc:
+        return _fail(name, exc)
+    if parsed.missing:
+        form = " ".join(f"--map '<header>={f}'" for f in parsed.missing)
+        headers_str = ", ".join(parsed.headers)
+        return _fail(
+            name,
+            f"missing required {args.kind} column(s): {', '.join(parsed.missing)};"
+            f" headers found: {headers_str};"
+            f" name them with {form}",
+        )
+    as_of = as_of_arg or parsed.newest_date
+    if args.apply:
+        if as_of is None:
+            return _fail(name, "no date found in the file; pass --as-of YYYY-MM-DD")
+        conn = _open_existing(name, args.db)
+        if isinstance(conn, int):
+            return conn
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
+        if "mapping" not in columns:
+            conn.close()
+            return _fail(name, "database schema is out of date (run `hub db migrate`)")
+    report = [f"{args.kind} file: {args.file} (header on row {parsed.header_row + 1})"]
+    report.extend(f"  {header} -> {field_name}" for header, field_name in parsed.mapping_report())
+    report.append(f"rows: {len(parsed.rows)}")
+    if not args.apply:
+        report.append(f"as_of: {as_of or 'not found (pass --as-of to apply)'}")
+        report.append("dry run: nothing written (use --apply)")
+        print("\n".join(report))
+        return 0
+    ref = custodian.source_ref(args.file)
+    mapping_json = json.dumps(overrides, sort_keys=True) if overrides else None
+    try:
+        try:
+            key = (args.custodian, args.kind, as_of, ref)
+            snapshot_id, created = store.insert_custodian_snapshot(
+                conn,
+                custodian=key[0],
+                kind=key[1],
+                as_of=key[2],
+                source_ref=key[3],
+                raw=raw,
+                mapping=mapping_json,
+            )
+            stored = None if created else store.get_custodian_snapshot_raw(conn, *key)
+        finally:
+            conn.close()
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+    print("\n".join(report))
+    if created:
+        print(f"snapshot {snapshot_id} written: {args.custodian} {args.kind} as of {as_of}")
+    else:
+        note = "" if stored == raw else "; file content differs, left as is"
+        print(
+            f"no-op: snapshot {snapshot_id} already holds {args.custodian} {args.kind}"
+            f" as of {as_of} from {ref}{note}"
+        )
+    return 0
+
+
+def cmd_custodian_list(args: argparse.Namespace) -> int:
+    name = "custodian list"
+    try:
+        conn = _open_existing(name, args.db)
+        if isinstance(conn, int):
+            return conn
+        try:
+            snaps = store.list_custodian_snapshots(conn)
+        finally:
+            conn.close()
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+    headers = ["custodian", "kind", "as_of", "imported_at", "rows"]
+    rows = []
+    for s in snaps:
+        mapping_text = s.get("mapping")
+        stored_overrides = None
+        if mapping_text:
+            try:
+                stored_overrides = json.loads(mapping_text)
+            except (json.JSONDecodeError, TypeError):
+                stored_overrides = None
+        row_count = custodian.count_rows(s["raw"], s["kind"], stored_overrides)
+        rows.append([s["custodian"], s["kind"], s["as_of"], s["imported_at"], str(row_count)])
+    widths = [max([len(h), *(len(r[i]) for r in rows)]) for i, h in enumerate(headers)]
+    for line in [headers, *rows]:
+        print("  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip())
+    return 0
+
+
 # group -> subcommand -> (help, handler). A group of None is a top-level command.
 COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], int]]]] = {
     "db": {
@@ -356,6 +482,10 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
         "list": ("list documents with their latest revision", cmd_doc_list),
         "show": ("print one revision of a document", cmd_doc_show),
         "revise": ("append a session revision to a document", cmd_doc_revise),
+    },
+    "custodian": {
+        "import": ("import a custodian positions or transactions CSV", cmd_custodian_import),
+        "list": ("list imported custodian snapshots", cmd_custodian_list),
     },
     None: {
         "session-open": ("run the session-open checks", cmd_session_open),
@@ -383,6 +513,8 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "doc list": _doc_list_args,
     "doc show": _doc_show_args,
     "doc revise": _doc_revise_args,
+    "custodian import": _custodian_import_args,
+    "custodian list": _db_path_arg,
     "session-open": _session_open_args,
 }
 

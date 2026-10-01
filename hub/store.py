@@ -173,6 +173,64 @@ def get_document_revision(conn: sqlite3.Connection, slug: str, revision: int | N
     return {"slug": slug, "kind": doc["kind"], "title": doc["title"], **dict(row)}
 
 
+def insert_custodian_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    custodian: str,
+    kind: str,
+    as_of: str,
+    source_ref: str,
+    raw: str,
+    mapping: str | None = None,
+) -> tuple[int, bool]:
+    """Write one custodian snapshot unless `(custodian, kind, as_of, source_ref)` is stored.
+
+    Returns `(id, created)`; an existing snapshot is left untouched and `created` is False.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT id FROM custodian_snapshots"
+            " WHERE custodian = ? AND kind = ? AND as_of = ? AND source_ref = ?",
+            (custodian, kind, as_of, source_ref),
+        ).fetchone()
+        if row is not None:
+            snapshot_id, created = row["id"], False
+        else:
+            snapshot_id = conn.execute(
+                "INSERT INTO custodian_snapshots (custodian, kind, as_of, source_ref, raw, mapping)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (custodian, kind, as_of, source_ref, raw, mapping),
+            ).lastrowid
+            created = True
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return snapshot_id, created
+
+
+def get_custodian_snapshot_raw(
+    conn: sqlite3.Connection, custodian: str, kind: str, as_of: str, source_ref: str
+) -> str | None:
+    """The stored file text for a snapshot key, or None."""
+    row = conn.execute(
+        "SELECT raw FROM custodian_snapshots"
+        " WHERE custodian = ? AND kind = ? AND as_of = ? AND source_ref = ?",
+        (custodian, kind, as_of, source_ref),
+    ).fetchone()
+    return None if row is None else row["raw"]
+
+
+def list_custodian_snapshots(conn: sqlite3.Connection) -> list[dict]:
+    """Every snapshot (including `raw` and `mapping`), oldest `as_of` first."""
+    rows = conn.execute(
+        "SELECT id, custodian, kind, as_of, source_ref, raw, mapping, imported_at"
+        " FROM custodian_snapshots ORDER BY as_of, custodian, kind, id"
+    )
+    return [dict(row) for row in rows]
+
+
 def integrity_check(path: Path) -> str:
     """Run `PRAGMA integrity_check` on the database file at `path`; return its verdict."""
     conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
