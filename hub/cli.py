@@ -387,13 +387,17 @@ def cmd_custodian_import(args: argparse.Namespace) -> int:
         conn = _open_existing(name, args.db)
         if isinstance(conn, int):
             return conn
-    print(f"{args.kind} file: {args.file} (header on row {parsed.header_row + 1})")
-    for header, field_name in parsed.mapping_report():
-        print(f"  {header} -> {field_name}")
-    print(f"rows: {len(parsed.rows)}")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
+        if "mapping" not in columns:
+            conn.close()
+            return _fail(name, "database schema is out of date (run `hub db migrate`)")
+    report = [f"{args.kind} file: {args.file} (header on row {parsed.header_row + 1})"]
+    report.extend(f"  {header} -> {field_name}" for header, field_name in parsed.mapping_report())
+    report.append(f"rows: {len(parsed.rows)}")
     if not args.apply:
-        print(f"as_of: {as_of or 'not found (pass --as-of to apply)'}")
-        print("dry run: nothing written (use --apply)")
+        report.append(f"as_of: {as_of or 'not found (pass --as-of to apply)'}")
+        report.append("dry run: nothing written (use --apply)")
+        print("\n".join(report))
         return 0
     ref = custodian.source_ref(args.file)
     mapping_json = json.dumps(overrides, sort_keys=True) if overrides else None
@@ -414,6 +418,7 @@ def cmd_custodian_import(args: argparse.Namespace) -> int:
             conn.close()
     except (store.StoreError, sqlite3.Error, OSError) as exc:
         return _fail(name, exc)
+    print("\n".join(report))
     if created:
         print(f"snapshot {snapshot_id} written: {args.custodian} {args.kind} as of {as_of}")
     else:

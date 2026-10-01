@@ -276,6 +276,13 @@ def _map_row(
     return mapping, absent
 
 
+def _is_summary_symbol(value: str) -> bool:
+    normalized = " ".join(value.strip().lower().split())
+    return normalized.endswith(" total") or normalized.startswith(
+        ("total", "subtotal", "grand total", "summary")
+    )
+
+
 def parse(
     text: str,
     kind: str,
@@ -299,9 +306,12 @@ def parse(
         if score > best_score:
             best, best_score = (index, mapping, row), score
     if best is None:
+        first_nonempty = next((row for row in rows if any(cell.strip() for cell in row)), [])
+        headers_found = ", ".join(first_nonempty)
         raise CustodianError(
             f"no header row found in the first {MAX_HEADER_SCAN_ROWS} rows"
-            f" ({kind} need {', '.join(REQUIRED[kind])} columns)"
+            f" ({kind} need {', '.join(REQUIRED[kind])} columns);"
+            f" headers found: {headers_found}; name them with --map 'header=field'"
         )
     header_row, mapping, headers = best
     _, absent = _map_row(kind, headers, norm_overrides)
@@ -330,7 +340,7 @@ def parse(
             if not all(col < len(r) and r[col].strip() for col in required_cols):
                 continue
             if sym_col is not None and sym_col < len(r):
-                if r[sym_col].strip().lower() in ("total", "account total"):
+                if _is_summary_symbol(r[sym_col]):
                     continue
             if qty_col is not None and qty_col < len(r):
                 if _parse_quantity(r[qty_col]) is None:

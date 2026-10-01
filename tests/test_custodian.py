@@ -1,4 +1,5 @@
 import csv
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,15 @@ def test_parse_map_rejects_unknown_field_and_absent_header():
         custodian.parse(text, "transactions", {"Nope": "price"})
 
 
+def test_no_recognized_header_reports_first_nonempty_cells_and_map_form():
+    text = "\nCustomTicker,CustomUnits\nTEST1,10\n"
+    with pytest.raises(custodian.CustodianError) as caught:
+        custodian.parse(text, "positions")
+    message = str(caught.value)
+    assert "headers found: CustomTicker, CustomUnits" in message
+    assert "--map 'header=field'" in message
+
+
 def test_newest_date_uses_first_date_of_an_as_of_cell():
     parsed = custodian.parse(TRANSACTIONS, "transactions")
     assert parsed.dates == ["2026-01-02", "2026-01-09"]
@@ -182,7 +192,9 @@ def test_apply_writes_one_snapshot_with_raw_and_newest_date(db, tmp_path, capsys
     assert snap["as_of"] == "2026-01-09"
     assert snap["source_ref"] == str(path)
     assert snap["raw"] == TRANSACTIONS
-    assert "written" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Date -> date" in out
+    assert "written" in out
 
 
 def test_apply_positions_with_explicit_as_of(db, tmp_path):
@@ -366,6 +378,31 @@ def test_migration_0002_applies_to_db_at_0001(tmp_path):
     conn.close()
 
 
+def test_apply_at_migration_0001_has_no_stdout_and_names_migrate_command(tmp_path, capsys):
+    db = tmp_path / "hub.db"
+    conn = store.connect(db)
+    migrations_0001 = [m for m in store.load_migrations() if m.version == 1]
+    store.migrate(conn, migrations_0001)
+    conn.close()
+    path = _write(tmp_path, "p.csv", POSITIONS)
+
+    assert (
+        _import(
+            db,
+            path,
+            "--apply",
+            "--as-of",
+            "2026-02-01",
+            kind="positions",
+        )
+        == 1
+    )
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "hub db migrate" in err
+    assert len(err.strip().splitlines()) == 1
+
+
 def test_map_duplicate_normalized_headers_rejected(db, tmp_path, capsys):
     path = _write(tmp_path, "onecol.csv", "Holding\nTEST1\n")
     assert (
@@ -440,17 +477,55 @@ def test_iso8601_datetime_cells_parsed_and_newest_date_selected():
     assert parsed.newest_date == "2026-01-09"
 
 
-def test_trailing_total_summary_and_disclaimer_rows_ignored():
+def test_summary_rows_ignored_without_excluding_ticker_prefixes():
     text = (
-        "Ticker,Shares\nTEST1,10\nTEST2,20\nAccount Total,\nDisclaimer: synthetic test data only\n"
+        "Ticker,Shares\n"
+        "TEST1,10\n"
+        "TOTL,20\n"
+        "Subtotal,30\n"
+        "Grand Total,30\n"
+        "Grand Total Holdings,30\n"
+        "Summary,30\n"
+        "Cash & Cash Investments Total,30\n"
+        "Total,30\n"
     )
     parsed = custodian.parse(text, "positions", {"Shares": "quantity"})
-    assert len(parsed.rows) == 2
+    assert [row[0] for row in parsed.rows] == ["TEST1", "TOTL"]
     assert custodian.count_rows(text, "positions", {"Shares": "quantity"}) == 2
 
     text_nums = 'Ticker,Shares\nTEST1,(15.5)\nTEST2,"1,250"\nTEST3,-50\nTotal,30\n'
     parsed_nums = custodian.parse(text_nums, "positions", {"Shares": "quantity"})
     assert len(parsed_nums.rows) == 3
+
+
+def test_non_numeric_quantity_row_ignored():
+    text = "Ticker,Shares\nTEST1,10\nNote,see footnote\nTEST2,20\n"
+    parsed = custodian.parse(text, "positions", {"Shares": "quantity"})
+    assert [row[0] for row in parsed.rows] == ["TEST1", "TEST2"]
+
+
+def test_apply_write_failure_has_empty_stdout(db, tmp_path, capsys, monkeypatch):
+    path = _write(tmp_path, "p.csv", POSITIONS)
+
+    def fail_insert(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic write failure")
+
+    monkeypatch.setattr(store, "insert_custodian_snapshot", fail_insert)
+    assert (
+        _import(
+            db,
+            path,
+            "--apply",
+            "--as-of",
+            "2026-02-01",
+            kind="positions",
+        )
+        == 1
+    )
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "synthetic write failure" in err
+    assert len(err.strip().splitlines()) == 1
 
 
 def test_apply_fails_before_printing_mapping_report(tmp_path, capsys):
