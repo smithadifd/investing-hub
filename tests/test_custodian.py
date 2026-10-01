@@ -320,8 +320,8 @@ def test_list_shows_snapshots_with_row_count_from_raw(db, tmp_path, capsys):
     capsys.readouterr()
     assert main(["custodian", "list", "--db", str(db)]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split() == ["custodian", "kind", "as_of", "imported_at", "rows"]
-    by_kind = {line.split()[1]: line.split() for line in lines[1:]}
+    assert lines[0].split() == ["custodian", "account", "kind", "as_of", "imported_at", "rows"]
+    by_kind = {line.split()[2]: line.split() for line in lines[1:]}
     assert by_kind["transactions"][0] == "testco"
     assert by_kind["transactions"][-1] == "2"
     assert by_kind["positions"][0] == "otherco"
@@ -367,10 +367,11 @@ def test_migration_0002_applies_to_db_at_0001(tmp_path):
     store.migrate(conn, migrations_0001)
     columns_before = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
     assert "mapping" not in columns_before
-    applied = store.migrate(conn)
+    applied = store.migrate(conn, [m for m in store.load_migrations() if m.version <= 2])
     assert applied == ["0002_custodian_mapping.sql"]
     columns_after = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
     assert "mapping" in columns_after
+    store.migrate(conn)
     snap_id, created = store.insert_custodian_snapshot(
         conn,
         custodian="testco",
@@ -578,3 +579,89 @@ def test_apply_fails_before_printing_mapping_report(tmp_path, capsys):
     out, err = capsys.readouterr()
     assert "no date found in the file; pass --as-of YYYY-MM-DD" in err
     assert out == ""
+
+
+# --- account labels -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ref, expected",
+    [
+        ("import/custodians/testco/2026-01-31/acct-one/positions.csv", "acct-one"),
+        ("/elsewhere/testco/2026-01-31/acct-two/t.csv", "acct-two"),
+        ("drop/positions.csv", None),
+        ("testco/not-a-date/acct/positions.csv", None),
+        ("positions.csv", None),
+    ],
+)
+def test_account_from_ref_reads_the_drop_layout(ref, expected):
+    assert custodian.account_from_ref(ref) == expected
+
+
+def _drop(tmp_path, account, name="transactions.csv", text=TRANSACTIONS):
+    folder = tmp_path / "testco" / "2026-01-31" / account
+    folder.mkdir(parents=True)
+    return _write(folder, name, text)
+
+
+def test_apply_derives_account_from_drop_layout(db, tmp_path, capsys):
+    path = _drop(tmp_path, "acct-one")
+    assert _import(db, path) == 0
+    assert "account: acct-one" in capsys.readouterr().out
+    assert _import(db, path, "--apply") == 0
+    assert [s["account"] for s in _snapshots(db)] == ["acct-one"]
+
+
+def test_account_flag_overrides_the_derived_label(db, tmp_path):
+    path = _drop(tmp_path, "acct-one")
+    assert _import(db, path, "--account", "joint", "--apply") == 0
+    assert [s["account"] for s in _snapshots(db)] == ["joint"]
+
+
+def test_file_outside_drop_layout_has_no_account(db, tmp_path, capsys):
+    path = _write(tmp_path, "t.csv", TRANSACTIONS)
+    assert _import(db, path) == 0
+    assert "account: none (pass --account to label it)" in capsys.readouterr().out
+    assert _import(db, path, "--apply") == 0
+    assert [s["account"] for s in _snapshots(db)] == [None]
+
+
+def test_list_tells_accounts_of_one_custodian_apart(db, tmp_path, capsys):
+    _import(db, _drop(tmp_path, "acct-one"), "--apply")
+    _import(db, _drop(tmp_path, "acct-two"), "--apply")
+    _import(db, _write(tmp_path, "t.csv", TRANSACTIONS), "--apply")
+    capsys.readouterr()
+    assert main(["custodian", "list", "--db", str(db)]) == 0
+    lines = capsys.readouterr().out.splitlines()[1:]
+    assert sorted(line.split()[1] for line in lines) == ["-", "acct-one", "acct-two"]
+
+
+def test_migration_0003_adds_account_and_list_derives_it_for_older_rows(tmp_path, capsys):
+    db = tmp_path / "hub.db"
+    conn = store.connect(db)
+    store.migrate(conn, [m for m in store.load_migrations() if m.version <= 2])
+    conn.execute(
+        "INSERT INTO custodian_snapshots (custodian, kind, as_of, source_ref, raw)"
+        " VALUES (?, ?, ?, ?, ?)",
+        ("testco", "transactions", "2026-01-31", "x/testco/2026-01-31/legacy/t.csv", TRANSACTIONS),
+    )
+    conn.commit()
+    assert store.migrate(conn) == ["0003_custodian_account.sql"]
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
+    assert "account" in columns
+    assert store.list_custodian_snapshots(conn)[0]["account"] is None
+    conn.close()
+    assert main(["custodian", "list", "--db", str(db)]) == 0
+    assert capsys.readouterr().out.splitlines()[1].split()[1] == "legacy"
+
+
+def test_apply_at_migration_0002_names_migrate_command(tmp_path, capsys):
+    db = tmp_path / "hub.db"
+    conn = store.connect(db)
+    store.migrate(conn, [m for m in store.load_migrations() if m.version <= 2])
+    conn.close()
+    path = _write(tmp_path, "t.csv", TRANSACTIONS)
+    assert _import(db, path, "--apply") == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "hub db migrate" in err

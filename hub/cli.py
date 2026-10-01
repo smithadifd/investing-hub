@@ -387,6 +387,12 @@ def _custodian_import_args(parser: argparse.ArgumentParser) -> None:
     _db_path_arg(parser)
     parser.add_argument("file", type=Path, help="CSV file to read")
     parser.add_argument("--custodian", required=True, help="custodian name, e.g. a broker label")
+    parser.add_argument(
+        "--account",
+        default=None,
+        metavar="LABEL",
+        help="account label (default: the <account-label> folder of the drop layout, if any)",
+    )
     parser.add_argument("--kind", required=True, choices=custodian.KINDS, help="file contents")
     parser.add_argument(
         "--as-of",
@@ -436,18 +442,21 @@ def cmd_custodian_import(args: argparse.Namespace) -> int:
         if isinstance(conn, int):
             return conn
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
-        if "mapping" not in columns:
+        if not {"mapping", "account"} <= columns:
             conn.close()
             return _fail(name, "database schema is out of date (run `hub db migrate`)")
     report = [f"{args.kind} file: {args.file} (header on row {parsed.header_row + 1})"]
     report.extend(f"  {header} -> {field_name}" for header, field_name in parsed.mapping_report())
     report.append(f"rows: {len(parsed.rows)}")
+    ref = custodian.source_ref(args.file)
+    account = args.account.strip() if args.account else custodian.account_from_ref(ref)
+    account = account or None
+    report.append(f"account: {account or 'none (pass --account to label it)'}")
     if not args.apply:
         report.append(f"as_of: {as_of or 'not found (pass --as-of to apply)'}")
         report.append("dry run: nothing written (use --apply)")
         print("\n".join(report))
         return 0
-    ref = custodian.source_ref(args.file)
     mapping_json = json.dumps(overrides, sort_keys=True) if overrides else None
     try:
         try:
@@ -460,6 +469,7 @@ def cmd_custodian_import(args: argparse.Namespace) -> int:
                 source_ref=key[3],
                 raw=raw,
                 mapping=mapping_json,
+                account=account,
             )
             stored = None if created else store.get_custodian_snapshot_raw(conn, *key)
         finally:
@@ -490,7 +500,7 @@ def cmd_custodian_list(args: argparse.Namespace) -> int:
             conn.close()
     except (store.StoreError, sqlite3.Error, OSError) as exc:
         return _fail(name, exc)
-    headers = ["custodian", "kind", "as_of", "imported_at", "rows"]
+    headers = ["custodian", "account", "kind", "as_of", "imported_at", "rows"]
     rows = []
     for s in snaps:
         mapping_text = s.get("mapping")
@@ -501,7 +511,10 @@ def cmd_custodian_list(args: argparse.Namespace) -> int:
             except (json.JSONDecodeError, TypeError):
                 stored_overrides = None
         row_count = custodian.count_rows(s["raw"], s["kind"], stored_overrides)
-        rows.append([s["custodian"], s["kind"], s["as_of"], s["imported_at"], str(row_count)])
+        account = s.get("account") or custodian.account_from_ref(s["source_ref"]) or "-"
+        rows.append(
+            [s["custodian"], account, s["kind"], s["as_of"], s["imported_at"], str(row_count)]
+        )
     widths = [max([len(h), *(len(r[i]) for r in rows)]) for i, h in enumerate(headers)]
     for line in [headers, *rows]:
         print("  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip())

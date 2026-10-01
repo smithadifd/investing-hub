@@ -42,8 +42,8 @@ hub import claude-export DIR [--apply]  # claude.ai export as revision-1 documen
 hub doc list [--titles]    # documents with latest revision, source and time; titles hidden unless asked
 hub doc show SLUG [--revision N]  # print one revision's body (default latest)
 hub doc revise SLUG --source-ref HANDLE [--body-file F] [--kind K] [--title T]  # append a session revision; body from F or stdin
-hub custodian import FILE --custodian NAME --kind positions|transactions [--as-of D] [--map H=F ...] [--apply]  # one CSV -> one custodian_snapshots row; dry run by default
-hub custodian list         # snapshots: custodian, kind, as_of, imported_at, row count
+hub custodian import FILE --custodian NAME --kind positions|transactions [--account L] [--as-of D] [--map H=F ...] [--apply]  # one CSV -> one custodian_snapshots row; dry run by default
+hub custodian list         # snapshots: custodian, account, kind, as_of, imported_at, row count
 hub ic show [--counts]     # counts-only view of the cached context pack
 hub session-open           # print the session status block; always exits 0, read-only
 ```
@@ -62,9 +62,11 @@ against synonym sets in `hub/custodian.py`. Required: transactions `date, action
 positions `symbol, quantity`. A missing one exits 1 naming it, the file's headers and the
 `--map 'header=field'` form. `--apply` needs an existing database and writes one snapshot
 (`raw` = the file text, `mapping` = stored `--map` overrides, `source_ref` = the path relative
-to the repo, else as given, `as_of` from `--as-of` or the newest date in a date column); a repeat
+to the repo, else as given, `account` from `--account` or the `<account-label>` folder of the drop
+layout, else none, `as_of` from `--as-of` or the newest date in a date column); a repeat
 of the same `(custodian, kind, as_of, source_ref)` is a no-op. `hub custodian list` takes `--db PATH`
-and reuses stored mappings when counting rows (ignoring trailing summary, total and disclaimer lines).
+and reuses stored mappings when counting rows (ignoring trailing summary, total and disclaimer lines);
+for a snapshot stored without an account it shows the label derived from `source_ref`, else `-`.
 Drop layout: README "Custodian exports".
 
 `hub doc list|show|revise` take `--db PATH`. `revise` appends a revision with `source_kind = session`
