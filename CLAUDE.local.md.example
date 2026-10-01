@@ -12,11 +12,14 @@
   `OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- hub ic pull`.
   The hub reads only `IC_API_TOKEN`; it never calls the credential manager itself.
 - Market data key (Massive): `op://Automation/Investing Companion - Secrets/MASSIVE_API_KEY`
-  Copy `.env.example` to `.env.local` (gitignored), export `OP_CONNECT_HOST=http://<connect-host>:8090`,
-  and start Claude Code with `scripts/hub-session.sh` so the key reaches the `massive` MCP server as
-  `MASSIVE_API_KEY` and the IC token reaches the SessionStart hook; the resolver never prints secrets.
-  Equivalent: `OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- claude`
-  One-time setup: `uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"`
+  Copy `.env.example` to `.env.local` (gitignored) and start Claude Code with `scripts/hub-session.sh`
+  so the key reaches the `massive` MCP server as `MASSIVE_API_KEY` and the IC token reaches the
+  SessionStart hook. The launcher picks one of three paths (README § Massive): `connect` (export
+  `OP_CONNECT_HOST=http://<connect-host>:8090`), `op` (signed-in 1Password CLI), or `env` (export
+  `MASSIVE_API_KEY` and `IC_API_TOKEN` yourself; no `.env.local` needed). Force one with
+  `HUB_SESSION_MODE=connect|op|env`. The resolvers never print secrets.
+  Equivalent for Connect: `OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- claude`
+  One-time setup: `uv tool install --with 'mcp<2' "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0.10.0"`
   and `cp .mcp.json.example .mcp.json`
 
 ## Endpoints
