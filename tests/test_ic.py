@@ -587,3 +587,232 @@ def test_bad_base_url_error_is_redacted(env, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "must start with http://" in captured.err
     _assert_one_redacted_line(captured, env)
+
+
+# --- hub ic show -------------------------------------------------------------------------
+
+
+SYNTHETIC_SHOW_META = {
+    "schema_version": "1.7",
+    "advisor_actions_version": "1.4",
+    "generated_at": "2026-01-02T03:04:05Z",
+    "fetched_at": "2026-01-02T03:05:00+00:00",
+}
+
+SYNTHETIC_SHOW_PACK = {
+    "schema_version": "1.7",
+    "advisor_actions_version": "1.4",
+    "generated_at": "2026-01-02T03:04:05Z",
+    "portfolio_value": "123456.78",
+    "total_invested": "98765.43",
+    "unknown_scalar_sentinel": "SENTINEL_SCALAR_VALUE",
+    "unknown_scalar_number": 777777,
+    "positions": [
+        {"symbol": "AAA", "account": "Taxable", "quantity": "100", "current_value": "50000"},
+        {"symbol": "BBB", "account": "IRA", "quantity": "200", "current_value": "73456.78"},
+    ],
+    "exposures": [
+        {"name": "Tech", "weight": "0.60"},
+        {"name": "Energy", "weight": "0.40"},
+    ],
+    "catalyst_exposures": [
+        {"theme": "AI", "weight": "0.70"},
+        {"theme": "Cloud", "weight": "0.30"},
+    ],
+    "active_alerts": [
+        {"id": "alt_1", "symbol": "AAA"},
+        {"id": "alt_2", "symbol": "BBB"},
+    ],
+    "recent_triggers": [
+        {"id": "trig_1", "type": "trailing_stop"},
+        {"id": "trig_2", "type": "take_profit"},
+    ],
+    "watchlist_targets": [
+        {"symbol": "CCC", "target_price": "555"},
+        {"symbol": "DDD", "target_price": "777"},
+    ],
+    "upcoming_events": [
+        {"event": "earnings_AAA", "date": "2027-10-15"},
+        {"event": "macro_release", "date": "2027-11-01"},
+    ],
+    "triggers": [
+        {"id": "t1", "rule": "rsi_break"},
+        {"id": "t2", "rule": "macd_cross"},
+    ],
+    "recent_handoffs": [
+        {"id": "h1", "action": "rebalance_action"},
+        {"id": "h2", "action": "trim_action"},
+    ],
+    "lessons": [
+        {"lesson": "patience_note", "context": "chop_regime"},
+        {"lesson": "risk_rule", "context": "sizing_limit"},
+    ],
+    "unsupported_features": [
+        {"feature": "options_trading"},
+        {"feature": "margin_borrow"},
+    ],
+    "future_extra_section": [
+        {"name": "future_item_1"},
+        {"name": "future_item_2"},
+        {"name": "future_item_3"},
+    ],
+    "trade_summary": {"total_trades": 99, "total_realized_pnl": "8888.88"},
+}
+
+
+def _write_cached_pack(root, pack=SYNTHETIC_SHOW_PACK, meta=SYNTHETIC_SHOW_META):
+    pack_dir = root / "data" / "ic"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    if pack is not None:
+        target = pack_dir / "pack-latest.json"
+        if isinstance(pack, bytes):
+            target.write_bytes(pack)
+        else:
+            target.write_text(
+                json.dumps(pack) if isinstance(pack, (dict, list)) else str(pack),
+                encoding="utf-8",
+            )
+    if meta is not None:
+        target = pack_dir / "pack-meta.json"
+        if isinstance(meta, bytes):
+            target.write_bytes(meta)
+        else:
+            target.write_text(
+                json.dumps(meta) if isinstance(meta, (dict, list)) else str(meta),
+                encoding="utf-8",
+            )
+
+
+def _collect_leaf_strings_and_numbers(data):
+    items = []
+    if isinstance(data, dict):
+        for v in data.values():
+            items.extend(_collect_leaf_strings_and_numbers(v))
+    elif isinstance(data, list):
+        for v in data:
+            items.extend(_collect_leaf_strings_and_numbers(v))
+    elif data is not None:
+        items.append(str(data))
+    return items
+
+
+def test_show_cached_pack_counts(env, capsys):
+    _write_cached_pack(env)
+    assert main(["ic", "show"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    # Assert that no symbol, number or string from any pack item appears in stdout
+    # Also assert unknown top-level scalars and portfolio figures are absent from stdout
+    assert "SENTINEL_SCALAR_VALUE" not in captured.out
+    assert "777777" not in captured.out
+    assert "123456.78" not in captured.out
+    assert "98765.43" not in captured.out
+    lines = captured.out.strip().split("\n")
+
+    assert lines[0] == (
+        "schema 1.7, advisor-actions 1.4, generated 2026-01-02T03:04:05Z,"
+        " fetched 2026-01-02T03:05:00+00:00"
+    )
+    expected_sections = [
+        "positions: 2",
+        "exposures: 2",
+        "catalyst_exposures: 2",
+        "active_alerts: 2",
+        "recent_triggers: 2",
+        "watchlist_targets: 2",
+        "upcoming_events: 2",
+        "triggers: 2",
+        "recent_handoffs: 2",
+        "lessons: 2",
+        "unsupported_features: 2",
+        "future_extra_section: 3",
+        "trade_summary: present",
+    ]
+    assert lines[1:] == expected_sections
+
+    for key, value in SYNTHETIC_SHOW_PACK.items():
+        if isinstance(value, list):
+            for item in value:
+                for leaf in _collect_leaf_strings_and_numbers(item):
+                    assert leaf not in captured.out, f"Item value {leaf!r} leaked in stdout"
+        elif key == "trade_summary":
+            for leaf in _collect_leaf_strings_and_numbers(value):
+                assert leaf not in captured.out, f"Trade summary value {leaf!r} leaked in stdout"
+
+    # --counts and no flag print identical stdout
+    assert main(["ic", "show", "--counts"]) == 0
+    counts_captured = capsys.readouterr()
+    assert counts_captured.err == ""
+    assert counts_captured.out == captured.out
+
+
+@pytest.mark.parametrize(
+    "trade_summary_val",
+    [None, "OMIT"],
+)
+def test_show_trade_summary_absent(env, capsys, trade_summary_val):
+    pack = {k: v for k, v in SYNTHETIC_SHOW_PACK.items() if k != "trade_summary"}
+    if trade_summary_val != "OMIT":
+        pack["trade_summary"] = None
+    _write_cached_pack(env, pack=pack)
+    assert main(["ic", "show"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "trade_summary: absent" in captured.out
+
+
+@pytest.mark.parametrize(
+    ("pack_val", "meta_val"),
+    [
+        (None, SYNTHETIC_SHOW_META),
+        (SYNTHETIC_SHOW_PACK, None),
+    ],
+)
+def test_show_missing_pack_exits_1(env, capsys, pack_val, meta_val):
+    _write_cached_pack(env, pack=pack_val, meta=meta_val)
+    assert main(["ic", "show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "hub ic pull" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("pack_content", "meta_content"),
+    [
+        ("not json", json.dumps(SYNTHETIC_SHOW_META)),
+        (json.dumps(SYNTHETIC_SHOW_PACK), "not json"),
+    ],
+)
+def test_show_invalid_json_exits_1(env, capsys, pack_content, meta_content):
+    _write_cached_pack(env, pack=pack_content, meta=meta_content)
+    assert main(["ic", "show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "hub ic pull" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("pack_content", "meta_content"),
+    [
+        (b"\xff\xfe\x00", SYNTHETIC_SHOW_META),
+        (SYNTHETIC_SHOW_PACK, b"\xff\xfe\x00"),
+    ],
+)
+def test_show_undecodable_utf8_exits_1(env, capsys, pack_content, meta_content):
+    _write_cached_pack(env, pack=pack_content, meta=meta_content)
+    assert main(["ic", "show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "hub ic pull" in captured.err
+
+
+def test_show_non_object_pack_exits_1(env, capsys):
+    _write_cached_pack(env, pack=[1, 2, 3], meta=SYNTHETIC_SHOW_META)
+    assert main(["ic", "show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "not a JSON object" in captured.err
