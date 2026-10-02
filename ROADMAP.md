@@ -2,7 +2,7 @@
 
 **Status:** foundation commands are implemented: database init, migration, backup and restore
 checks; claude.ai export import; IC pack pull, docs and show; document list, show and revise;
-custodian import and list; and session-open checks. The sweep, notifier, session launcher and
+custodian import and list; and session-open checks. The scheduled scoring pass, notifier, session launcher and
 handoff approval loop remain planned. This file is public-safe: no portfolio data, account
 numbers, or personal specifics belong here.
 
