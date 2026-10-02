@@ -107,6 +107,39 @@ The `connect` path wraps this resolver call:
 OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- claude
 ```
 
+#### Resolving the key per server (no launcher needed)
+
+The default `.mcp.json` passes `${MASSIVE_API_KEY}` through from the shell that started `claude`, so
+a plain `claude` in the repo starts the server with an empty key and every call fails with
+`Unknown API Key`. To make the server independent of how the session starts, have it resolve its
+own key. Put only the Massive reference in `.env.massive` (gitignored by `.env.*`):
+
+```bash
+MASSIVE_API_KEY=op://<vault>/<item>/MASSIVE_API_KEY
+```
+
+and wrap the server command in your local `.mcp.json`. Use absolute paths, since the file is local:
+
+```json
+{
+  "mcpServers": {
+    "massive": {
+      "command": "/Users/<you>/.claude/scripts/op-resolve.py",
+      "args": ["--env-file", "/path/to/investing-hub/.env.massive",
+               "--", "/Users/<you>/.local/bin/mcp_massive"],
+      "env": { "OP_CONNECT_HOST": "http://<connect-host>:8090" }
+    }
+  }
+}
+```
+
+For the `op` CLI, use `"command": "op"` with `"args": ["run", "--env-file", "/path/to/investing-hub/.env.massive", "--", "/Users/<you>/.local/bin/mcp_massive"]`
+and drop the `env` block. Use a separate env file rather than `.env.local` so the server only receives
+its own key, not `IC_API_TOKEN`. If the resolver fails, it exits non-zero before starting the
+server, and `/mcp` shows `massive` as failed.
+`IC_API_TOKEN` still has to come from the launcher (or the environment); without it,
+`hub session-open` prints a `WARN contract:` line.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
