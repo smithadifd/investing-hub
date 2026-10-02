@@ -1,7 +1,10 @@
 # Investing Hub — Roadmap
 
-**Status:** pre-build. Kicked off 2026-09-30. No code yet. This file is public-safe: no
-portfolio data, account numbers, or personal specifics belong here.
+**Status:** foundation commands are implemented: database init, migration, backup and restore
+checks; claude.ai export import; IC pack pull, docs and show; document list, show and revise;
+custodian import and list; and session-open checks. The sweep, notifier, session launcher and
+handoff approval loop remain planned. This file is public-safe: no portfolio data, account
+numbers, or personal specifics belong here.
 
 ## What it is
 
