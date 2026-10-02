@@ -59,10 +59,7 @@ def build_report() -> tuple[str, bool]:
         stamp = doc.get("stamp") if doc is not None else None
         expected = doc.get("expected_stamp") if doc is not None else None
         present = (
-            isinstance(stamp, str)
-            and bool(stamp)
-            and isinstance(expected, str)
-            and bool(expected)
+            isinstance(stamp, str) and bool(stamp) and isinstance(expected, str) and bool(expected)
         )
         add(
             f"{doc_key} stamps present",
