@@ -1,5 +1,6 @@
 """IC client tests against a local HTTP server. Every pack and token here is synthetic."""
 
+import io
 import json
 import socket
 import threading
@@ -7,6 +8,8 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -156,6 +159,213 @@ def _assert_one_redacted_line(captured, root, token=TOKEN):
     assert captured.err.count("\n") == 1, captured.err
     assert token not in captured.err
     assert token not in _all_file_text(root)
+
+
+# --- hub ic preflight --------------------------------------------------------------------
+
+
+@pytest.fixture
+def preflight_http(tmp_path, monkeypatch):
+    """An in-process HTTP response fixture for the shared GET client."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(ic.TOKEN_ENV, TOKEN)
+    monkeypatch.setenv(ic.BASE_URL_ENV, "http://ic.example.invalid")
+    routes = {}
+    requests = []
+
+    def route(path, status=200, body=None, delay=0.0):
+        routes[path] = (status, body, delay)
+
+    def respond(request, timeout):
+        path = urlsplit(request.full_url).path
+        requests.append((path, dict(request.headers)))
+        status, body, delay = routes.get(path, (404, {}, 0.0))
+        if delay > timeout:
+            raise urllib.error.URLError(TimeoutError("timed out"))
+        if status != 200:
+            raise urllib.error.HTTPError(request.full_url, status, "synthetic", {}, None)
+        return io.BytesIO(json.dumps(body).encode())
+
+    _use_opener(monkeypatch, respond)
+    return SimpleNamespace(root=tmp_path, route=route, requests=requests)
+
+
+def _ready_docs():
+    docs = json.loads(json.dumps(SYNTHETIC_DOCS))
+    docs["advisor_actions"] = _doc("advisor-actions.md", "1.4", "1.4", "# Synthetic\n")
+    return docs
+
+
+def _preflight_routes(fake_ic, pack=None, docs=None):
+    fake_ic.route(ic.CONTEXT_PACK_PATH, body=SYNTHETIC_PACK if pack is None else pack)
+    fake_ic.route(ic.CONTRACT_DOCS_PATH, body=_ready_docs() if docs is None else docs)
+
+
+def test_preflight_all_pass_is_read_only(preflight_http, capsys):
+    _preflight_routes(preflight_http)
+    assert main(["ic", "preflight"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.count("PASS ") == 9
+    assert "PASS: 9 passed, 0 failed" in captured.out
+    assert f"[GET {ic.CONTEXT_PACK_PATH}#/generated_at]" in captured.out
+    assert f"[GET {ic.CONTRACT_DOCS_PATH}#/handoff_schema" in captured.out
+    assert MARKER_SYMBOL not in captured.out
+    assert MARKER_VALUE not in captured.out
+    assert TOKEN not in captured.out
+    assert list(preflight_http.root.iterdir()) == [], "preflight created a local file"
+    assert [path for path, _ in preflight_http.requests] == [
+        ic.CONTEXT_PACK_PATH,
+        ic.CONTRACT_DOCS_PATH,
+    ]
+
+
+@pytest.mark.parametrize("key", ["generated_at", "schema_version", "advisor_actions_version"])
+def test_preflight_fails_for_each_missing_pack_field(preflight_http, capsys, key):
+    pack = dict(SYNTHETIC_PACK)
+    del pack[key]
+    _preflight_routes(preflight_http, pack=pack)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert f"FAIL {key} present" in out
+    assert "PASS pack reachable" in out
+    assert list(preflight_http.root.iterdir()) == []
+
+
+@pytest.mark.parametrize("doc_key", ["handoff_schema", "advisor_actions"])
+@pytest.mark.parametrize("field", ["stamp", "expected_stamp"])
+def test_preflight_fails_for_each_missing_doc_stamp(preflight_http, capsys, doc_key, field):
+    docs = _ready_docs()
+    del docs[doc_key][field]
+    _preflight_routes(preflight_http, docs=docs)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert f"FAIL {doc_key} stamps present" in out
+    assert "PASS contract docs reachable" in out
+    assert list(preflight_http.root.iterdir()) == []
+
+
+@pytest.mark.parametrize("doc_key", ["handoff_schema", "advisor_actions"])
+def test_preflight_fails_when_a_contract_doc_is_missing(preflight_http, capsys, doc_key):
+    docs = _ready_docs()
+    del docs[doc_key]
+    _preflight_routes(preflight_http, docs=docs)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert f"FAIL {doc_key} stamps present" in out
+    assert f"FAIL {doc_key} stamps match" in out
+    assert "PASS contract docs reachable" in out
+
+
+@pytest.mark.parametrize("doc_key", ["handoff_schema", "advisor_actions"])
+@pytest.mark.parametrize("field", ["stamp", "expected_stamp", "stamp_matches"])
+def test_preflight_fails_for_each_doc_mismatch(preflight_http, capsys, doc_key, field):
+    docs = _ready_docs()
+    docs[doc_key][field] = False if field == "stamp_matches" else "different"
+    _preflight_routes(preflight_http, docs=docs)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert f"FAIL {doc_key} stamps match" in out
+    assert f"PASS {doc_key} stamps present" in out
+    assert list(preflight_http.root.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("doc_key", "pack_key"),
+    [("handoff_schema", "schema_version"), ("advisor_actions", "advisor_actions_version")],
+)
+def test_preflight_compares_doc_stamps_to_pack(preflight_http, capsys, doc_key, pack_key):
+    pack = dict(SYNTHETIC_PACK)
+    pack[pack_key] = "different"
+    _preflight_routes(preflight_http, pack=pack)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert f"FAIL {doc_key} stamps match" in out
+    assert f"PASS {doc_key} stamps present" in out
+
+
+@pytest.mark.parametrize("path", [ic.CONTEXT_PACK_PATH, ic.CONTRACT_DOCS_PATH])
+def test_preflight_fails_when_either_endpoint_is_unavailable(preflight_http, capsys, path):
+    _preflight_routes(preflight_http)
+    preflight_http.route(path, status=503, body={})
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert "unavailable (503)" in out
+    label = "pack reachable" if path == ic.CONTEXT_PACK_PATH else "contract docs reachable"
+    assert f"FAIL {label}" in out
+    assert list(preflight_http.root.iterdir()) == []
+
+
+@pytest.mark.parametrize("path", [ic.CONTEXT_PACK_PATH, ic.CONTRACT_DOCS_PATH])
+def test_preflight_rejects_non_object_response(preflight_http, capsys, path):
+    _preflight_routes(preflight_http)
+    preflight_http.route(path, body=[])
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    label = "pack reachable" if path == ic.CONTEXT_PACK_PATH else "contract docs reachable"
+    assert f"FAIL {label}" in out
+    assert "response is not a JSON object" in out
+
+
+def test_preflight_missing_token_fails_closed(preflight_http, capsys, monkeypatch):
+    monkeypatch.delenv(ic.TOKEN_ENV)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL pack reachable" in out
+    assert "FAIL contract docs reachable" in out
+    assert preflight_http.requests == []
+    assert list(preflight_http.root.iterdir()) == []
+
+
+def test_preflight_timeout_fails_closed(preflight_http, capsys, monkeypatch):
+    _preflight_routes(preflight_http)
+    monkeypatch.setattr(ic, "TIMEOUT_SECONDS", 0.2)
+    preflight_http.route(ic.CONTEXT_PACK_PATH, body=SYNTHETIC_PACK, delay=1.0)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL pack reachable" in out
+    assert "did not respond within 0.2s (timeout)" in out
+    assert "PASS contract docs reachable" in out
+    assert list(preflight_http.root.iterdir()) == []
+
+
+def test_preflight_redacts_token_from_stdout_and_explicit_file(preflight_http, capsys, monkeypatch):
+    monkeypatch.setenv(ic.TOKEN_ENV, PLAIN_TOKEN)
+    pack = dict(SYNTHETIC_PACK)
+    pack["schema_version"] = PLAIN_TOKEN
+    docs = _ready_docs()
+    docs["handoff_schema"]["stamp"] = PLAIN_TOKEN
+    _preflight_routes(preflight_http, pack=pack, docs=docs)
+    out_file = preflight_http.root / "readiness.txt"
+    assert main(["ic", "preflight", "--out", str(out_file)]) == 1
+    captured = capsys.readouterr()
+    assert PLAIN_TOKEN not in captured.out + captured.err + out_file.read_text()
+    assert captured.out == out_file.read_text()
+    assert sorted(p.name for p in preflight_http.root.iterdir()) == ["readiness.txt"]
+
+
+def test_preflight_redacts_an_error_echoing_the_token(preflight_http, capsys, monkeypatch):
+    monkeypatch.setenv(ic.TOKEN_ENV, PLAIN_TOKEN)
+
+    def echoed_error(base_url, path, token):
+        raise ic.IcError(f"upstream echoed {PLAIN_TOKEN}")
+
+    monkeypatch.setattr(ic, "get_json", echoed_error)
+    assert main(["ic", "preflight"]) == 1
+    out = capsys.readouterr().out
+    assert PLAIN_TOKEN not in out
+    assert f"upstream echoed {ic.REDACTED}" in out
+    assert list(preflight_http.root.iterdir()) == []
+
+
+def test_preflight_explicit_output_on_success(preflight_http, capsys):
+    _preflight_routes(preflight_http)
+    out_file = preflight_http.root / "readiness.txt"
+    assert main(["ic", "preflight", "--out", str(out_file)]) == 0
+    assert out_file.is_file(), "explicit --out did not create the report"
+    assert out_file.read_text() == capsys.readouterr().out
+    assert "PASS: 9 passed, 0 failed" in out_file.read_text()
+    assert sorted(p.name for p in preflight_http.root.iterdir()) == ["readiness.txt"]
 
 
 # --- hub ic pull -------------------------------------------------------------------------

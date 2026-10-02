@@ -8,7 +8,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from hub import custodian, ic, importer, restore, session_open, store
+from hub import custodian, ic, importer, preflight, restore, session_open, store
 
 
 def _db_path_arg(parser: argparse.ArgumentParser) -> None:
@@ -195,6 +195,17 @@ def cmd_ic_docs(args: argparse.Namespace) -> int:
         print(ic.redact(doc.content.rstrip("\n"), token))
         print()
     return 0
+
+
+def cmd_ic_preflight(args: argparse.Namespace) -> int:
+    report, ready = preflight.build_report()
+    if args.out is not None:
+        try:
+            args.out.write_text(report, encoding="utf-8")
+        except OSError as exc:
+            return _ic_fail("ic preflight", ic.IcError(f"cannot write report: {exc.strerror}"))
+    print(report, end="")
+    return 0 if ready else 1
 
 
 def cmd_ic_show(args: argparse.Namespace) -> int:
@@ -538,6 +549,10 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
     "ic": {
         "pull": ("fetch the Investing Companion context pack", cmd_ic_pull),
         "docs": ("show Investing Companion's contract docs", cmd_ic_docs),
+        "preflight": (
+            "check Investing Companion readiness without changing local state",
+            cmd_ic_preflight,
+        ),
         "show": ("show counts from the cached context pack", cmd_ic_show),
     },
     "doc": {
@@ -573,6 +588,10 @@ def _ic_show_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _ic_preflight_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--out", type=Path, help="write the redacted report to this file")
+
+
 # Full command name -> function adding that command's arguments to its parser.
 ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db init": _db_path_arg,
@@ -580,6 +599,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "db backup": _backup_args,
     "db restore-check": _restore_check_args,
     "import claude-export": _import_args,
+    "ic preflight": _ic_preflight_args,
     "ic show": _ic_show_args,
     "doc list": _doc_list_args,
     "doc show": _doc_show_args,
