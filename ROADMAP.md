@@ -164,6 +164,104 @@ model, such as off-book assets and account metadata.
 - Template polish: adapter docs, setup guide, demo data, onboarding interview (carried over from
   the starter kit's `ONBOARDING.md`).
 
+## Incubating (from advisor sessions)
+
+Ideas raised by real sessions and not yet scheduled into a phase. Each one names the failure it
+came from, a proposed shape, and the questions to sharpen before it becomes work. Ordered by how
+directly it would have changed the session that raised it.
+
+### I1. Ladders as data: every earmark carries a size (raised 2026-10-02)
+- **Failure:** dry powder sat idle for months. The earmarked uses had trigger prices but no dollar
+  or share sizes, so a printed level could never fire mechanically and every rung became a fresh
+  judgment call. Two documents also carried contradictory share counts against the same
+  percent-of-account anchor, which went unnoticed for weeks.
+- **Shape:** a `ladders` / `rungs` table (subject, account, trigger series and level, size in
+  shares or percent, confirmation rule, expiry, status). Session-open warns on any earmark with
+  no size and on any cash balance not covered by sized rungs ("unclaimed cash"). A lint step
+  recomputes shares from the percent anchor at the current price and flags drift between documents.
+- **Phase fit:** P1. It is a prerequisite for stage 0 scoring, which needs sized rungs to say
+  what a finding is worth.
+- **Sharpen:** does the hub own rungs, or are they an IC concept (entry_zones) that the hub only
+  annotates with sizes? Percent of account, or fixed shares re-derived at fire time?
+
+### I2. Confirmation rules as deterministic predicates (raised 2026-10-02)
+- **Failure:** a rung's rule was "wait for basing" with no definition. Twice, price spent weeks
+  under the rung and nothing happened, because the condition was a judgment under time pressure,
+  which is exactly what pre-committed rungs are meant to remove.
+- **Shape:** a small predicate vocabulary evaluated on daily bars in stage 0, for example
+  `no_new_low(n_sessions, floor)`, `closes_above(level, n)`, `reclaim(level)`,
+  `higher_low(lookback)`. Each rung names its predicate. The sweep reports progress ("basing
+  2 of 3") and fires a finding when the predicate completes. No model is involved.
+- **Phase fit:** P3 (shadow), with the vocabulary designed in P1 alongside I1.
+- **Sharpen:** what is the minimal vocabulary that covers the existing rules? Should a predicate
+  reset be a finding in its own right ("the floor broke, the next rung is now live")?
+
+### I3. Zone selectivity check before a level is trusted (raised 2026-10-02)
+- **Failure:** an entry zone looked like a pullback level, but bars showed it had traded through
+  in four separate months: the middle of a range, not a stretch. An alternative "N% drawdown from
+  the high" criterion had silently been met for months because the high had moved.
+- **Shape:** for every zone, compute from 52 weeks of bars the share of sessions that traded
+  inside or through it, the months it printed, and where it sits in the trailing range. Then
+  recompute any drawdown criterion against the current 52-week high. Session-open flags low-selectivity
+  zones. This extends the existing standing rule ("confirm the level has not already printed")
+  from a habit into a check.
+- **Phase fit:** P1 (one-time audit) and then stage 0 (recurring).
+- **Sharpen:** what selectivity threshold separates a real pullback zone from a mid-range level?
+  Should the check apply to tripwires and invalidation levels too?
+
+### I4. Earnings and event calendar with confidence (raised 2026-10-02)
+- **Failure:** earnings dates came from web summaries, some estimated or not company-confirmed,
+  and the proximity-window rule ("use the earlier date") had to be applied by hand per name. Resting
+  orders need an expiry tied to the window.
+- **Shape:** an `events` table (subject, date, kind, confidence `confirmed | estimated`, source,
+  as-of). Session-open lists windows opening in the next 10 days, and resting rungs (I1) inherit an
+  expiry from the next window. IC's event seeding is the upstream source where it exists.
+- **Phase fit:** P1/P2.
+- **Sharpen:** hub-owned, or pushed to IC as `ADD_EVENT` handoffs only once confirmed?
+
+### I5. Handoff drafts in the store, not prose (raised 2026-10-02)
+- **Failure:** proposed IC edits were written as a table inside a knowledge document, so
+  session-open reported "unapplied handoffs: 0" while about nine proposals were actually pending.
+- **Shape:** a thin first step of flow C: `hub handoff draft --file F` writes a `handoffs` row in
+  `draft`, `hub handoff list` shows it, and session-open counts it. Approval and application
+  stay manual until the executor loop exists.
+- **Phase fit:** P1. It is small and makes session-open truthful.
+- **Sharpen:** one block per proposal, or one block per session? How should a draft carry a
+  dependency on another ("held for the operator")?
+
+### I6. Task export to the operator's task manager (raised 2026-10-02)
+- **Failure:** decisions ended a session as document prose. The operator asked for them as dated
+  tasks in their own task manager (the reference instance uses Notion), which today is a manual,
+  per-session step through a connector.
+- **Shape:** a `tasks` adapter beside the notifier adapter. Decisions with an action and a date
+  (I1 rungs, I4 windows, follow-up reviews) export as tasks with a stable external id. Reading
+  back completion closes the loop: a task marked done prompts a `LOG_TRADE` handoff or a document
+  revision at the next session-open. Notion is the reference adapter; a plain-file adapter is the
+  template default.
+- **Phase fit:** P2 for export, and alongside flow D for read-back.
+- **Sharpen:** is the task manager a source of truth for "did I do it", or only a reminder layer
+  with custodian exports as the truth? Should tasks also come from the decision journal?
+
+### I7. Producers discoverable from session-open (raised 2026-10-02)
+- **Failure:** a session went to the web for podcast analysis while the producer's own corpus
+  (transcripts, per-episode analyses, theme indexes) sat on the same machine. The session didn't
+  know it existed.
+- **Shape:** pull a sliver of P2 forward. Session-open prints one line per configured producer
+  (name, path, newest artifact and its date), from a `producers:` block in `config.yaml`. The
+  advisor reads producers before any external lookup. P2 proper (structured reads, book-context
+  export) is unchanged.
+- **Phase fit:** P0.5 / P1. It's a few lines in session-open plus config.
+- **Sharpen:** which producers get a line by default? Should a dated call in a producer's ledger
+  that resolves this week (an FOMC, a refunding) surface as a session-open item?
+
+### I8. Gate inputs from the pack, not the web (raised 2026-10-02)
+- **Failure:** a sizing gate depended on a futures series that the market-data plan doesn't
+  carry, and the IC token wasn't in the session, so the gate was checked from web summaries.
+- **Shape:** session-open resolves every gate's input series from the cached pack, with as-of
+  times, and warns when a gate input is older than a day or only web-sourced. Covered by the
+  existing IC read path. The gap is listing gate series explicitly (I1's trigger-series field).
+- **Phase fit:** P1, with I1.
+
 ## IC-side changes (separate track, in `investing_companion`)
 
 - **The advisor starter kit graduates.** `docs/advisor-starter-kit/` moves to this repo as its
@@ -188,6 +286,8 @@ model, such as off-book assets and account metadata.
 - **Sweep cadence.** Pre-market daily plus post-close? Event-driven when a digest lands?
 - **Where IC serves contract docs from:** an API endpoint, or raw files at the deployed commit.
 - **Retention** for findings and asks.
+- **Incubating items I1–I8** each carry their own sharpen questions (see above). I1 and I2 should
+  be designed together, since they share the rung schema.
 
 ## Source material
 
