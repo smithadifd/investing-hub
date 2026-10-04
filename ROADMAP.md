@@ -100,9 +100,11 @@ model, such as off-book assets and account metadata.
 - **C. Handoff.** A session writes a block, the operator approves it, and the IC executor applies it
   and posts a receipt. The next pack shows the receipt, the hub marks the handoff applied, and
   proposes any document revisions that follow from it.
-- **D. Keeping docs current (P1).** Receipts, imported trades, new digests and finished sessions
-  produce *proposed* revisions, which get accepted in a session. A stale document becomes a sweep
-  finding.
+- **D. Keeping docs current (write-back policy).** Revisions follow the three-tier write-back policy:
+  facts (receipts, imported trades, pack-derived state) apply directly with provenance via the
+  shared kit's `changes` log; interpretations (producer analyses) are drafted as proposed revisions
+  or briefs settled in session; levels and sizes (rungs, ladders, earmarks) are always proposed.
+  IC handoffs stay approval-gated as before. Stale documents become sweep findings.
 - **E. Interests.** The hub notices shifts in what the operator cares about (from what gets
   discussed and which asks get a Yes or Skip) and writes `beats_proposals`. It never edits the
   beats file directly.
@@ -136,21 +138,56 @@ model, such as off-book assets and account metadata.
 - Re-baseline IC's state: current deployment host, status of #262/#263/#265, open bugs.
 - **Exit:** the documents, IC and the custodians agree, and every level has a named source.
 
-### P2 — Producer integration
-- The hub reads producer outputs (week-ahead briefs, mv-analyst analyses and index).
-- Producers can read a non-sensitive **book-context export** from the hub (themes and exposure
-  direction, no positions or values) to sharpen coverage. Interpreting what it means for the book
-  stays with the hub.
+### P2 — Producer integration and conversational surfaces
+- **Producer adapters:** The hub reads producer outputs (first adapter: `mv-analyst` episode
+  analyses, calls, attention; next: `week-ahead` briefs and ledger calls/beats; feed-condenser
+  triage queue).
+- **No duplicate pings or alerts:** The hub never re-announces a producer's new artifact (producers
+  already post their own embeds) and never duplicates IC's price/watchlist alerts. Asks and
+  surfaced items key strictly on meaning for the operator's book.
+- **Daily pulse, low interruption:** A "Your book" section in the 07:45 morning brief, sized to the
+  day (one line on quiet days, more when things moved, plus a "worth discussing" line). Written
+  into the hub's own instance (`out/book/<date>.md`) so the morning brief job reads it if present
+  and fresh without cross-repo writes.
+- **Midweek letter:** A short midweek letter as living-desk's replacement (carrying forward
+  living-desk's merit gate, rotation and 52-week scans, and deterministic visual into the hub).
+- **Book-context export:** Producers can read a non-sensitive export from the hub (themes and
+  exposure direction, no positions or values) to sharpen coverage. Interpreting what it means for
+  the book stays with the hub.
 - `beats_proposals` go live (flow E).
 
 ### P3 — Sweep in shadow mode
-- Findings are logged and nothing is sent.
-- A weekly review of the would-have-pinged list tunes the stage 0 thresholds.
-- **Exit:** the operator would have tapped Yes on most of what the shadow log flagged.
+- **Deterministic stage 0 evaluation:** Every trigger is computable in stage 0 without a model
+  (thesis-linked series moves, rung predicates, dated call resolutions bearing on the book, beats
+  "would make it lead" conditions). Stage 1 drafts brief lines or ask prose only when a stage 0
+  finding crosses threshold.
+- **Shadow logging and tuning:** Findings are logged and nothing is sent. A weekly review of the
+  would-have-pinged list tunes stage 0 thresholds against the high ask bar (separating items suited
+  for the morning brief or midweek letter from true Herald asks).
+- **Pace adaptation modeling:** Test the Yes/Skip throttling model and verify pause-and-resume
+  behavior during quiet stretches or away periods (quiet stretches pause rather than ratchet down
+  to silence).
+- **Exit:** the operator would have tapped Yes on most of what the shadow log flagged as asks, and
+  stage 0 triggers reliably filter noise.
 
-### P4 — Asks go live
-- herald ask-minting brief. This is an authorization change under herald's own governance.
-- Seat launcher (cmux plus remote control) and push notification.
+### P4 — Asks go live and conversational layer
+- **Purpose — "draw the operator in":** The hub starts conversations and keeps the daily pulse
+  moving so the operator does not have to initiate every touchpoint. Two rooms, two temperaments:
+  kitchen-table draws out (asks-heavy); the hub processes and surfaces (read-heavy, occasional
+  conversation).
+- **High-bar asks (Herald):** Herald asks are reserved strictly for:
+  1. Thesis or position invalidation risk;
+  2. A rung trigger firing or near;
+  3. A dated call resolving that bears on the book;
+  4. A beats "would make it lead" condition met.
+  All other items route to the morning brief or midweek letter.
+- **Ask notification payload:** Discord names the topic and why it matters; figures and numbers
+  wait for the interactive conversation.
+- **Shared kit components:** The bell (notification delivery) and seat launcher (cmux workspace plus
+  Claude Code in remote-control mode with push notification) come from the shared kit. Herald
+  ask-minting follows herald governance.
+- **Adaptive pace with pause-and-resume:** Pace is throttled by the running Yes/Skip ratio, but
+  quiet stretches and operator away periods pause the cadence rather than ratcheting down to silence.
 - The Yes/Skip ratio stays visible as the running health metric.
 
 ### P5 — Absorb `~/code/investing`
@@ -182,7 +219,11 @@ directly it would have changed the session that raised it.
 - **Phase fit:** P1. It is a prerequisite for stage 0 scoring, which needs sized rungs to say
   what a finding is worth.
 - **Sharpen:** does the hub own rungs, or are they an IC concept (entry_zones) that the hub only
-  annotates with sizes? Percent of account, or fixed shares re-derived at fire time?
+  annotates with sizes? Percent of account, or fixed shares re-derived at fire time? Rungs are
+  implementation intentions (if trigger + confirmation predicate, then size), the same primitive as
+  kitchen-table's commitments (if cue date, then action). Design the `rungs` schema so cue type
+  (`date | predicate`), status, slip/expiry and follow-up are shared fields, with the predicate
+  evaluated by stage 0.
 
 ### I2. Confirmation rules as deterministic predicates (raised 2026-10-02)
 - **Failure:** a rung's rule was "wait for basing" with no definition. Twice, price spent weeks
@@ -194,7 +235,11 @@ directly it would have changed the session that raised it.
   2 of 3") and fires a finding when the predicate completes. No model is involved.
 - **Phase fit:** P3 (shadow), with the vocabulary designed in P1 alongside I1.
 - **Sharpen:** what is the minimal vocabulary that covers the existing rules? Should a predicate
-  reset be a finding in its own right ("the floor broke, the next rung is now live")?
+  reset be a finding in its own right ("the floor broke, the next rung is now live")? Shares the
+  if-then implementation intention primitive with I1 and kitchen-table: confirmation predicates
+  complete the trigger condition (`if trigger + confirmation predicate, then size`), with predicate
+  evaluation performed deterministically in stage 0. Shared schema fields: cue type (`date | predicate`),
+  status, slip/expiry, and follow-up.
 
 ### I3. Zone selectivity check before a level is trusted (raised 2026-10-02)
 - **Failure:** an entry zone looked like a pullback level, but bars showed it had traded through
@@ -281,13 +326,17 @@ directly it would have changed the session that raised it.
 - **Repo name.** `investing-hub` follows the local convention. `investing_hub` would pair with
   `investing_companion`, and IC receipts already use `source: "investing_hub"`.
 - **How `~/code/investing` merges** (P5 details).
-- **Doc-revision acceptance.** Auto-apply trivial revisions (a receipt that confirms an alert
-  re-level), or always propose?
+- **Doc-revision acceptance / write-back policy (settled 2026-10-03).** Replaced by Andrew's
+  three-tier policy:
+  1. *Facts that must stay current* (receipts, imported trades, pack-derived state) apply directly with provenance; the shared kit's `changes` log is the mechanism.
+  2. *Interpretation* (what a producer analysis means for a thesis) is drafted as a proposed revision or a brief and settled in a session.
+  3. *Anything that sets a level or a size* (rungs, ladders, earmarks) is always proposed, never applied silently.
+  IC handoffs stay approval-gated as before.
 - **Sweep cadence.** Pre-market daily plus post-close? Event-driven when a digest lands?
 - **Where IC serves contract docs from:** an API endpoint, or raw files at the deployed commit.
 - **Retention** for findings and asks.
-- **Incubating items I1–I8** each carry their own sharpen questions (see above). I1 and I2 should
-  be designed together, since they share the rung schema.
+- **Incubating items I1–I8** each carry their own sharpen questions (see above). I1 and I2 share
+  the implementation intention primitive schema (`rungs` with cue type, status, slip/expiry, follow-up).
 
 ## Source material
 
