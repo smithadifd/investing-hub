@@ -143,6 +143,7 @@ database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fa
 | `HUB_IC_BASE_URL` | Optional; overrides `ic.base_url` from `config.yaml` (see `config.example.yaml`) |
 | `MASSIVE_API_KEY` | Massive market-data key, read by the `massive` MCP server declared in `.mcp.json`, either via `${MASSIVE_API_KEY}` expansion (resolved from `.env.local` at launch) or resolved by the server itself from a gitignored `.env.massive` (README "Resolving the key per server"); never commit it |
 | `OP_CONNECT_HOST` | 1Password Connect URL (`http://<connect-host>:8090`); selects the `connect` path of `scripts/hub-session.sh`, which resolves `.env.local` via `~/.claude/scripts/op-resolve.py` and starts `claude` so `MASSIVE_API_KEY` and `IC_API_TOKEN` reach the session |
+| `HUB_INSTANCE_DIR` | Optional; the directory `scripts/hub-session.sh` works in and reads `.env.local` from. Unset, it is the current directory, so run the script from the instance directory |
 | `HUB_SESSION_MODE` | Optional; `connect`, `op` or `env` forces one credential path in `scripts/hub-session.sh`. Unset, it auto-detects: `env` (both variables already set), then `connect` (`OP_CONNECT_HOST` set), then `op` (the 1Password CLI is installed, resolving `.env.local` with `op run`). `.env.local` is required except in `env` mode |
 
 `.mcp.json` is local-only (gitignored); copy it from `.mcp.json.example`.

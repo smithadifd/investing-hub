@@ -209,14 +209,14 @@ def normalize_overrides(
     return normalized
 
 
-def repo_root() -> Path:
-    """The checkout this package lives in (`source_ref` is relative to it)."""
-    return Path(__file__).resolve().parents[1]
-
-
 def source_ref(path: Path, root: Path | None = None) -> str:
-    """`path` relative to the repo root when inside it, else as given."""
-    root = root or repo_root()
+    """`path` relative to `root` when inside it, else as given.
+
+    `root` defaults to the current working directory, the same base the database, backup and
+    config defaults resolve against, so run from an instance directory the stored ref stays
+    `import/<...>` however the file was named on the command line.
+    """
+    root = root or Path.cwd()
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:

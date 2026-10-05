@@ -47,7 +47,9 @@ class Sandbox:
         )
         path.chmod(0o755)
 
-    def run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, cwd: Path | None = None, **extra: str
+    ) -> subprocess.CompletedProcess[str]:
         env = {k: v for k, v in os.environ.items() if k not in MODE_VARS}
         env.update(HOME=str(self.home), PATH=f"{self.bin}:/usr/bin:/bin")
         env.update(extra)
@@ -57,6 +59,7 @@ class Sandbox:
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=cwd or self.root,
         )
 
 
@@ -180,8 +183,9 @@ def test_missing_env_local_exits_2_before_exec(
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr == (
-        "hub-session: .env.local is missing; copy .env.example to .env.local "
-        "(see README § Massive)\n"
+        f"hub-session: .env.local is missing (looked in {tmp_path.resolve()}); copy "
+        ".env.example to .env.local there, run from the instance directory, or set "
+        "HUB_INSTANCE_DIR (see README § Massive)\n"
     )
 
 
@@ -191,3 +195,35 @@ def test_env_mode_skips_env_local_check(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == "claude\n"
     assert result.stderr == "hub-session: using env\n"
+
+
+def test_root_is_the_working_directory_not_the_script_location(tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    box = Sandbox(tmp_path / "code", with_op=True, with_env_local=True)
+    elsewhere = tmp_path / "instance"
+    elsewhere.mkdir()
+    # .env.local sits beside the script, but the working directory has none.
+    result = box.run(cwd=elsewhere, **CONNECT)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert ".env.local is missing" in result.stderr
+    assert str(elsewhere.resolve()) in result.stderr
+
+
+def test_instance_dir_override_supplies_env_local(tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    box = Sandbox(tmp_path / "code", with_op=True, with_env_local=False)
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / ".env.local").write_text("")
+    result = box.run(cwd=tmp_path, HUB_INSTANCE_DIR=str(instance), **CONNECT)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == "hub-session: using connect\n"
+    assert result.stdout == "op-resolve [--env-file] [.env.local] [--] [claude]\n"
+
+
+def test_instance_dir_override_must_exist(tmp_path: Path) -> None:
+    box = Sandbox(tmp_path, with_op=True, with_env_local=True)
+    result = box.run(HUB_INSTANCE_DIR=str(tmp_path / "absent"), **CONNECT)
+    assert result.returncode == 2
+    assert result.stderr.startswith("hub-session: cannot enter HUB_INSTANCE_DIR=")

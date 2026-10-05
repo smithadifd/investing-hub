@@ -172,6 +172,35 @@ def test_source_ref_relative_inside_root_else_as_given(tmp_path):
     assert custodian.source_ref(Path("/elsewhere/file.csv"), tmp_path) == "/elsewhere/file.csv"
 
 
+def test_source_ref_defaults_to_the_working_directory(tmp_path, monkeypatch):
+    instance = tmp_path / "instance"
+    drop = instance / "import" / "acct-one"
+    drop.mkdir(parents=True)
+    inside = drop / "positions.csv"
+    inside.write_text("x")
+    outside = tmp_path / "elsewhere" / "file.csv"
+    monkeypatch.chdir(instance)
+    assert custodian.source_ref(inside) == "import/acct-one/positions.csv"
+    assert custodian.source_ref(Path("import/acct-one/positions.csv")) == (
+        "import/acct-one/positions.csv"
+    )
+    assert custodian.source_ref(outside) == str(outside)
+
+
+def test_import_from_an_instance_directory_stores_a_relative_ref(tmp_path, monkeypatch):
+    instance = tmp_path / "instance"
+    drop = instance / "import" / "testco" / "2026-01-09" / "acct-one"
+    drop.mkdir(parents=True)
+    path = _write(drop, "t.csv", TRANSACTIONS)
+    monkeypatch.chdir(instance)
+    db = instance / "data" / "hub.db"
+    assert main(["db", "init", "--db", str(db)]) == 0
+    assert _import(db, path, "--apply") == 0
+    (snap,) = _snapshots(db)
+    assert snap["source_ref"] == "import/testco/2026-01-09/acct-one/t.csv"
+    assert custodian.account_from_ref(snap["source_ref"]) == "acct-one"
+
+
 # --- CLI: import ----------------------------------------------------------------------
 
 
