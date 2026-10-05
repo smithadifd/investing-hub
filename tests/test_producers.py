@@ -77,17 +77,17 @@ def test_mv_analyst_one_candidate_per_done_marker(copy_fixtures):
     report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
     assert report.producer == producers.MV_ANALYST
     assert report.status == producers.STATUS_OK
-    assert len(report.candidates) == 2
-    summaries = sorted(c.summary for c in report.candidates)
+    done = [c for c in report.candidates if c.kind == "episode_done"]
+    assert len(done) == 2
+    summaries = sorted(c.summary for c in done)
     assert summaries == ["MV901 analysis ready", "MV902 analysis ready"]
-    for candidate in report.candidates:
-        assert candidate.kind == "episode_done"
+    for candidate in done:
         assert candidate.as_of.endswith("Z")
 
 
 def test_mv_analyst_uses_analysis_file_as_source_path_when_present(copy_fixtures):
     report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
-    paths = sorted(c.source_path for c in report.candidates)
+    paths = sorted(c.source_path for c in report.candidates if c.kind == "episode_done")
     # mv901 and mv902 each have a matching analysis file in the fixture.
     assert any(p.endswith("2026-01-15-mv901-a-analysis.md") for p in paths)
     assert any(p.endswith("2026-01-22-mv902-b-analysis.md") for p in paths)
@@ -121,6 +121,65 @@ def test_mv_analyst_malformed_marker_is_skipped_not_a_failure(tmp_path):
     assert [c.summary for c in report.candidates] == ["MV903 analysis ready"]
 
 
+def test_mv_analyst_calls_index_yields_open_call_candidates(copy_fixtures):
+    report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
+    calls = [c for c in report.candidates if c.kind in ("open_call", "overdue_call")]
+    # One overdue, one dated open and one undated open; the Scorecard and
+    # Resolved sections are history and yield nothing.
+    assert sorted((c.kind, c.summary) for c in calls) == [
+        (
+            "open_call",
+            "Fixture Guest B — Synthetic upcoming call — threshold for fixture"
+            " (resolves 2026-11-15)",
+        ),
+        (
+            "open_call",
+            "Fixture Guest C — Synthetic undated call — threshold for fixture",
+        ),
+        (
+            "overdue_call",
+            "Fixture Guest A — Synthetic overdue call — threshold for fixture (was due 2026-02-10)",
+        ),
+    ]
+    for candidate in calls:
+        assert candidate.source_path.endswith("index/calls.md")
+
+
+def test_mv_analyst_calls_index_as_of_is_the_made_date_not_the_deadline(copy_fixtures):
+    report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
+    overdue = next(c for c in report.candidates if c.kind == "overdue_call")
+    # Made 2026-01-02; the 2026-02-10 due date is a deadline, not provenance.
+    assert overdue.as_of == "2026-01-02T00:00:00Z"
+    upcoming = next(
+        c for c in report.candidates if c.kind == "open_call" and "Fixture Guest B" in c.summary
+    )
+    assert upcoming.as_of == "2026-01-20T00:00:00Z"
+
+
+def test_mv_analyst_attention_index_yields_one_candidate_per_beat(copy_fixtures):
+    report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
+    beats = [c for c in report.candidates if c.kind == "attention_beat"]
+    assert sorted(c.summary for c in beats) == [
+        "lead: Synthetic lead beat",
+        "standing: Synthetic standing beat",
+        "watch: Synthetic watch beat",
+    ]
+    for candidate in beats:
+        assert candidate.source_path.endswith("index/attention.md")
+        assert candidate.as_of  # the view carries no dates, so the file mtime
+
+
+def test_mv_analyst_analysis_themes_yield_candidates(copy_fixtures):
+    report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
+    themes = [c for c in report.candidates if c.kind == "episode_themes"]
+    assert sorted((c.summary, c.as_of) for c in themes) == [
+        ("MV901 themes: inflation-path, long-end-yields", "2026-01-15T00:00:00Z"),
+        ("MV902 themes: oil-price-formation", "2026-01-22T00:00:00Z"),
+    ]
+    for candidate in themes:
+        assert candidate.source_path.endswith("-analysis.md")
+
+
 # --- week-ahead --------------------------------------------------------------------------------
 
 
@@ -137,6 +196,15 @@ def test_week_ahead_open_call_rows_become_candidates(copy_fixtures):
         assert candidate.kind == "open_call"
         assert candidate.source_path.endswith("calls.md")
         assert candidate.as_of.startswith("2026-")
+
+
+def test_week_ahead_open_call_as_of_is_the_made_date(copy_fixtures):
+    report = producers.week_ahead_candidates(copy_fixtures["week_ahead_root"])
+    by_summary = {c.summary: c.as_of for c in report.candidates}
+    # Made 2026-01-12 resolves 2026-01-20: provenance is the record's own date,
+    # never the future deadline it resolves by.
+    assert by_summary["Synthetic call A — threshold for fixture"] == "2026-01-12T00:00:00Z"
+    assert by_summary["Synthetic call C — also open"] == "2026-01-14T00:00:00Z"
 
 
 def test_week_ahead_writes_one_beat_proposal_per_beat_when_conn_supplied(copy_fixtures, fresh_db):
@@ -161,6 +229,26 @@ def test_week_ahead_repeat_write_does_not_duplicate(copy_fixtures, fresh_db):
         "Rates and the curve",
         "Volatility",
     ]
+
+
+def test_week_ahead_beat_without_weight_inserts_once_across_two_reads(copy_fixtures, fresh_db):
+    conn, _db_path = fresh_db
+    beats_path = copy_fixtures["week_ahead_root"] / "beats.md"
+    beats_path.write_text(
+        beats_path.read_text(encoding="utf-8")
+        + "\n### Unweighted fixture beat\nNo Weight line under this heading.\n"
+    )
+    producers.week_ahead_candidates(copy_fixtures["week_ahead_root"], conn=conn)
+    producers.week_ahead_candidates(copy_fixtures["week_ahead_root"], conn=conn)
+    rows = list(
+        conn.execute(
+            "SELECT proposal, rationale FROM beats_proposals"
+            " WHERE proposal = 'Unweighted fixture beat'"
+        )
+    )
+    # A NULL rationale must still dedup: `= NULL` never matches an existing row.
+    assert len(rows) == 1
+    assert rows[0]["rationale"] is None
 
 
 def test_week_ahead_does_not_write_beats_md():
@@ -235,6 +323,60 @@ def test_triage_queue_advances_after_appending_new_lines(copy_fixtures, fresh_db
     after = producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
     assert len(after.candidates) == 1
     assert after.candidates[0].summary == "primary — Synthetic triage record D"
+
+
+def test_triage_queue_partial_final_line_is_read_once_completed(copy_fixtures, fresh_db):
+    conn, _db_path = fresh_db
+    path = copy_fixtures["triage_queue_dir"] / "primary.jsonl"
+    producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    # Append a record without its newline — the writer is mid-append.
+    with open(path, "ab") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "queued": "2026-02-05T09:30:00+00:00",
+                    "account": "primary",
+                    "message_id": "msg-005",
+                    "sender": "Fixture Sender E",
+                    "subject": "Synthetic partial record",
+                    "source_rule": "fixture-rule-e",
+                }
+            ).encode()
+        )
+    mid_append = producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    assert mid_append.candidates == []  # a partial line is never consumed
+    # The newline lands; the completed record is read exactly once.
+    with open(path, "ab") as fh:
+        fh.write(b"\n")
+    completed = producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    assert [c.summary for c in completed.candidates] == ["primary — Synthetic partial record"]
+    again = producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    assert again.candidates == []
+
+
+def test_triage_queue_same_size_rotation_yields_new_records(copy_fixtures, fresh_db):
+    conn, _db_path = fresh_db
+    path = copy_fixtures["triage_queue_dir"] / "primary.jsonl"
+    producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    # Rewrite the file in place to the exact same byte size — a rotation that
+    # neither grows nor shrinks the file. Only a content identity catches it.
+    size = path.stat().st_size
+    line = json.dumps(
+        {
+            "queued": "2026-03-02T00:00:00+00:00",
+            "account": "primary",
+            "message_id": "msg-rotated",
+            "sender": "Fixture Sender Rotation",
+            "subject": "Rotated record",
+            "source_rule": None,
+        }
+    ).encode()
+    padding = size - len(line) - 1  # json tolerates trailing spaces on the line
+    assert padding >= 0
+    path.write_bytes(line + b" " * padding + b"\n")
+    assert path.stat().st_size == size
+    second = producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    assert [c.summary for c in second.candidates] == ["primary — Rotated record"]
 
 
 def test_triage_queue_never_modifies_the_jsonl_files(copy_fixtures, fresh_db):
@@ -317,11 +459,15 @@ def test_status_reports_handles_all_missing_roots(tmp_path):
 # --- CLI surface -------------------------------------------------------------------------------
 
 
-def test_hub_producers_list_prints_every_candidate(copy_fixtures, capsys):
+def test_hub_producers_list_prints_every_candidate(copy_fixtures, fresh_db, capsys):
+    conn, db_path = fresh_db
+    conn.close()
     rc = main(
         [
             "producers",
             "list",
+            "--db",
+            str(db_path),
             "--mv-analyst-root",
             str(copy_fixtures["mv_analyst_root"]),
             "--week-ahead-root",
@@ -332,18 +478,54 @@ def test_hub_producers_list_prints_every_candidate(copy_fixtures, capsys):
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "mv-analyst: ok — 2 candidate(s)" in out
+    assert "mv-analyst: ok — 10 candidate(s)" in out
     assert "week-ahead: ok — 2 candidate(s)" in out
     assert "triage-queue: ok — 3 candidate(s)" in out
     assert "MV901 analysis ready" in out
     assert "primary — Synthetic triage record A" in out
 
 
-def test_hub_producers_list_reports_absent_producers(tmp_path, capsys):
+def test_hub_producers_list_is_stateful_across_runs(copy_fixtures, fresh_db, capsys):
+    """The CLI path persists: a second run yields no repeat triage candidates."""
+    conn, db_path = fresh_db
+    conn.close()
+    argv = [
+        "producers",
+        "list",
+        "--db",
+        str(db_path),
+        "--mv-analyst-root",
+        str(copy_fixtures["mv_analyst_root"]),
+        "--week-ahead-root",
+        str(copy_fixtures["week_ahead_root"]),
+        "--triage-queue-dir",
+        str(copy_fixtures["triage_queue_dir"]),
+    ]
+    assert main(argv) == 0
+    first = capsys.readouterr().out
+    assert "triage-queue: ok — 3 candidate(s)" in first
+    assert main(argv) == 0
+    second = capsys.readouterr().out
+    assert "triage-queue: empty — 0 candidate(s)" in second
+    assert "triage-queue: ok — 3 candidate(s)" not in second
+    # The beat proposals were written once, not re-inserted by the second run.
+    conn = store.connect(db_path)
+    try:
+        proposals = [row[0] for row in conn.execute("SELECT proposal FROM beats_proposals")]
+    finally:
+        conn.close()
+    assert sorted(proposals) == ["Energy", "Rates and the curve", "Volatility"]
+
+
+def test_hub_producers_list_reports_absent_producers(tmp_path, capsys, fresh_db):
+    conn, db_path = fresh_db
+    conn.close()
     rc = main(
         [
             "producers",
             "list",
+            "--db",
+            str(db_path),
             "--mv-analyst-root",
             str(tmp_path / "nope-mv"),
             "--week-ahead-root",
@@ -371,6 +553,8 @@ def test_producers_list_arg_defaults_are_the_home_paths():
     parser = argparse.ArgumentParser()
     _producers_list_args(parser)
     ns = parser.parse_args([])
-    assert ns.mv_analyst_root == producers.DEFAULT_MV_ANALYST_ROOT
-    assert ns.week_ahead_root == producers.DEFAULT_WEEK_AHEAD_ROOT
-    assert ns.triage_queue_dir == producers.DEFAULT_TRIAGE_QUEUE_DIR
+    # Pin the literal producer data homes, not the module constants: pointing a
+    # default back at a ~/code checkout must fail here, not ship.
+    assert ns.mv_analyst_root == Path.home() / "mv-analyst"
+    assert ns.week_ahead_root == Path.home() / "week-ahead"
+    assert ns.triage_queue_dir == Path.home() / "brief" / "investing-triage-queue"

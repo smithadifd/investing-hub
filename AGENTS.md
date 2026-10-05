@@ -44,6 +44,7 @@ hub doc show SLUG [--revision N]  # print one revision's body (default latest)
 hub doc revise SLUG --source-ref HANDLE [--body-file F] [--kind K] [--title T]  # append a session revision; body from F or stdin
 hub custodian import FILE --custodian NAME --kind positions|transactions [--account L] [--as-of D] [--map H=F ...] [--apply]  # one CSV -> one custodian_snapshots row; dry run by default
 hub custodian list         # snapshots: custodian, account, kind, as_of, imported_at, row count
+hub producers list [--db PATH] [--mv-analyst-root R] [--week-ahead-root R] [--triage-queue-dir D]  # stage-0 candidates; stateful: advances the triage cursor and writes beat proposals
 hub ic show [--counts]     # counts-only view of the cached context pack
 hub session-open           # print the session status block; always exits 0, read-only
 ```
@@ -80,12 +81,20 @@ in `config.yaml`, else 30), and one `WARN` line per problem. It never writes any
 exits 0. `.claude/settings.json` runs it as the `SessionStart` hook, so its output opens every
 session; the hook falls back to `python3 -m hub` and never fails the session if `hub` is absent.
 
+`hub producers list` takes `--db PATH` (an existing store, so run `hub db init` first) plus
+root overrides for the three producer data homes (`~/mv-analyst`, `~/week-ahead`,
+`~/brief/investing-triage-queue` by default). It is the stateful producer path: the triage
+read cursor persists and week-ahead beat proposals are written; `hub session-open` prints
+the same producer lines but reads without persisting anything. Producer files are never
+written, moved or truncated.
+
 ## Repo map
 
 ```text
 hub/cli.py       argparse entry point; one function per subcommand
 hub/importer.py  claude.ai export reader behind `hub import claude-export`
 hub/custodian.py custodian CSV reader behind `hub custodian import` (synonym maps, preamble skip)
+hub/producers/   read-only producer adapters (mv-analyst index/analyses, week-ahead ledger/beats, triage queue)
 hub/store.py     SQLite connection, migrations, document revisions, custodian snapshots, backups
 hub/restore.py   backup restore check (integrity, tables, row counts)
 hub/migrations/  numbered SQL migrations (NNNN_name.sql), shipped as package data

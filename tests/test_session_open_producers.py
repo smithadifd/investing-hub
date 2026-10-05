@@ -104,7 +104,7 @@ def producers_obj():
 
 
 def test_session_open_still_exits_zero_with_no_producer_root_overrides(env, capsys):
-    """The default roots (~/code/... etc.) do not have to exist for exit 0."""
+    """The default roots (~/mv-analyst etc.) do not have to exist for exit 0."""
     rc = main(["session-open"])
     assert rc == 0
     out = capsys.readouterr().out

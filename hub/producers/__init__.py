@@ -13,12 +13,15 @@ adapter writes per-beat proposals to ``beats_proposals`` only — never to
 files themselves, so an absent or empty root yields zero candidates with a clear
 status line — never an exception.
 
-``status_reports`` is the canonical entry used by ``session-open``; ``cli`` wires
-``hub producers list`` against the same function.
+``status_reports`` is the canonical entry used by both ``session-open`` (no
+connection, so nothing is persisted) and ``hub producers list`` (with the hub
+store's connection, so the triage cursor persists and beat proposals are
+written).
 """
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from hub.producers.common import (
@@ -51,7 +54,6 @@ __all__ = [
     "STATUS_ABSENT",
     "STATUS_EMPTY",
     "mv_analyst_candidates",
-    "week_ahead_candidates",
     "triage_queue_candidates",
     "status_reports",
 ]
@@ -62,16 +64,17 @@ def status_reports(
     mv_analyst_root: Path | str | None = None,
     week_ahead_root: Path | str | None = None,
     triage_queue_dir: Path | str | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> list[ProducerReport]:
     """Run the three adapters against their (overridable) roots.
 
-    The adapters touch the store when ``conn`` is supplied; the default
-    ``status_reports`` here does not (session-open must not advance the read
-    cursor). Callers that want the cursor advanced and the ``beats_proposals``
-    written should call the per-adapter functions with their own connection.
+    With ``conn`` the adapters are stateful against the hub store: the
+    triage-queue read cursor persists and the week-ahead beat proposals are
+    written. Without it (the session-open path) the adapters only read, so a
+    session never advances the cursor or writes proposals.
     """
     return [
         mv_analyst_candidates(mv_analyst_root),
-        week_ahead_candidates(week_ahead_root),
-        triage_queue_candidates(triage_queue_dir),
+        week_ahead_candidates(week_ahead_root, conn=conn),
+        triage_queue_candidates(triage_queue_dir, conn=conn),
     ]

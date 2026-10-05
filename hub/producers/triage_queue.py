@@ -3,21 +3,26 @@
 The morning brief writes one ``<account>.jsonl`` per inbox with one JSON object
 per ``[[mode]]`` newsletter routing; ``append_records`` dedups by ``message_id``
 so a record never appears twice in the file. The hub's contract with the queue
-is read-only: we never modify, move or truncate the jsonl files, and a small
-smoke test in ``tests/test_producers.py`` asserts those bytes and mtime are
-unchanged after a read.
+is read-only: we never modify, move or truncate the jsonl files, and a smoke
+test in ``tests/test_producers.py`` asserts those bytes and mtime are unchanged
+after a read.
 
-The cursor is keyed by the absolute source path and stores the byte size at the
-last successful read; when the file grows, only the new tail is parsed. If the
-file shrinks (truncated or rolled over) the cursor resets to zero — that's a
-real signal, not a regression.
+The cursor is keyed by the absolute source path and stores three things: the
+byte offset of the last complete newline consumed, the file's size, and a
+content identity — a hash of the file's first bytes. Only complete lines are
+consumed, so a final line still being appended is read once, when its newline
+lands. If the identity changes (the file was rotated or rewritten, even to the
+same size) or the file shrank below the offset (truncated), the read restarts
+from zero — that is a real signal, not a regression.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from typing import BinaryIO
 
 from hub.producers.common import (
     DEFAULT_TRIAGE_QUEUE_DIR,
@@ -27,6 +32,7 @@ from hub.producers.common import (
     TRIAGE_QUEUE,
     Candidate,
     ProducerReport,
+    truncate,
 )
 
 
@@ -57,35 +63,60 @@ def triage_queue_candidates(
 def _browse_one(path: Path, conn: sqlite3.Connection | None) -> list[Candidate]:
     """One jsonl file's worth of new candidates, cursor-aware.
 
-    The cursor is the byte size of the file at the last successful read; on a
-    subsequent call, lines whose byte offset is above the stored size are not
-    re-counted. If the file shrank (someone truncated and started fresh), we
-    reset the cursor to zero — that's a real signal, not a regression.
+    The cursor holds the byte offset of the last complete newline consumed plus
+    the file's content identity. The offset never advances past an incomplete
+    final line, so a record being appended right now is read exactly once, when
+    its newline lands. A different identity (rotation, or an in-place rewrite
+    that keeps the same size) or a size below the offset (truncation) restarts
+    the file from zero.
     """
     stat = path.stat()
     size = stat.st_size
     mtime = stat.st_mtime_ns
-    previous_size = _read_cursor(conn, str(path.resolve())) if conn is not None else None
-    out: list[Candidate] = []
-    if size == 0:
-        if conn is not None:
-            _write_cursor(conn, str(path.resolve()), 0, file_size=0, file_mtime=mtime)
-        return out
-    # Decide what to read: full file (no cursor yet, or file shrank) vs. tail
-    # (file grew since last read) vs. nothing (file unchanged).
-    if previous_size is None or previous_size > size:
-        tail_offset = 0
-    elif previous_size < size:
-        tail_offset = previous_size
-    else:
-        tail_offset = size  # signal: nothing new
+    key = str(path.resolve())
     with open(path, "rb") as fh:
-        if tail_offset < size:
-            fh.seek(tail_offset)
-            tail = fh.read()
+        identity = _file_identity(fh)
+        cursor = _read_cursor(conn, key) if conn is not None else None
+        if cursor is None or cursor[0] > size or cursor[1] != identity:
+            offset = 0
         else:
-            tail = b""
-    for raw in tail.splitlines():
+            offset = cursor[0]
+        fh.seek(offset)
+        tail = fh.read()
+    # Only complete lines count: a final line without its newline is a record
+    # still being written, and it is read next time once it completes.
+    last_newline = tail.rfind(b"\n")
+    complete = b"" if last_newline < 0 else tail[: last_newline + 1]
+    out = _parse_records(complete, path)
+    if conn is not None:
+        _write_cursor(
+            conn,
+            key,
+            offset + len(complete),
+            file_size=size,
+            file_mtime=mtime,
+            file_identity=identity,
+        )
+    return out
+
+
+def _file_identity(fh: BinaryIO) -> str:
+    """A hash of the file's first line — its identity across appends and rotations.
+
+    The first line, not the first N bytes: an append grows the file, and a
+    fixed-size window eventually swallows the appended records, which would
+    flip the identity on every append and replay the whole file. The first
+    line is stable under appends and changes on any real rotation; a rotation
+    that reproduces the first line byte-for-byte is indistinguishable on purpose.
+    """
+    fh.seek(0)
+    return hashlib.sha256(fh.readline()).hexdigest()
+
+
+def _parse_records(data: bytes, path: Path) -> list[Candidate]:
+    """One candidate per complete JSON line in ``data``."""
+    out: list[Candidate] = []
+    for raw in data.splitlines():
         if not raw.strip():
             continue
         try:
@@ -104,22 +135,23 @@ def _browse_one(path: Path, conn: sqlite3.Connection | None) -> list[Candidate]:
             Candidate(
                 producer=TRIAGE_QUEUE,
                 kind="triage_record",
-                summary=summary[:200] + ("…" if len(summary) > 200 else ""),
+                summary=truncate(summary),
                 source_path=str(path.resolve()),
                 as_of=queued,
             )
         )
-    if conn is not None:
-        _write_cursor(conn, str(path.resolve()), size, file_size=size, file_mtime=mtime)
     return out
 
 
-def _read_cursor(conn: sqlite3.Connection, source_path: str) -> int | None:
+def _read_cursor(conn: sqlite3.Connection, source_path: str) -> tuple[int, str | None] | None:
+    """The stored ``(offset, identity)`` for one source file, or None."""
     row = conn.execute(
-        "SELECT last_read_size FROM producer_cursors WHERE source_path = ?",
+        "SELECT last_read_size, file_identity FROM producer_cursors WHERE source_path = ?",
         (source_path,),
     ).fetchone()
-    return None if row is None else int(row[0])
+    if row is None:
+        return None
+    return int(row[0]), row[1]
 
 
 def _write_cursor(
@@ -129,13 +161,16 @@ def _write_cursor(
     *,
     file_size: int,
     file_mtime: int,
+    file_identity: str,
 ) -> None:
     conn.execute(
-        "INSERT INTO producer_cursors (source_path, last_read_size, file_size, file_mtime)"
-        " VALUES (?, ?, ?, ?)"
+        "INSERT INTO producer_cursors"
+        " (source_path, last_read_size, file_size, file_mtime, file_identity)"
+        " VALUES (?, ?, ?, ?, ?)"
         " ON CONFLICT(source_path) DO UPDATE SET"
         " last_read_size = excluded.last_read_size,"
         " file_size = excluded.file_size,"
-        " file_mtime = excluded.file_mtime",
-        (source_path, last_read_size, file_size, file_mtime),
+        " file_mtime = excluded.file_mtime,"
+        " file_identity = excluded.file_identity",
+        (source_path, last_read_size, file_size, file_mtime, file_identity),
     )

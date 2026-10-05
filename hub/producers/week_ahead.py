@@ -21,10 +21,13 @@ from hub.producers.common import (
     WEEK_AHEAD,
     Candidate,
     ProducerReport,
+    as_iso_date,
+    file_mtime_iso,
+    truncate,
 )
 
-# week-ahead's ``ledger/calls.md`` is the SoT the revise stage appends to; the
-# rows follow the ``Made | Call | Resolves by | Status | Resolution`` shape the
+# week-ahead's ``ledger/calls.md`` is the SoT the revise stage appends to; the rows follow
+# the ``Made | Call | Resolves by | Status | Resolution`` shape the
 # brief's scorecard grades itself against.
 _RESOLVED_STATES = {"hit", "miss", "mixed", "not-triggered"}
 # We need only to set ``in_table`` once on the header; any later check is on
@@ -77,21 +80,22 @@ def _read_calls(path: Path) -> list[Candidate]:
             if len(cells) < 4:
                 continue
             made, call, resolves_by, status_value = cells[0], cells[1], cells[2], cells[3]
-            made_iso = _as_iso_date(made)
-            res_iso = _as_iso_date(resolves_by)
-            if made_iso is None:
+            made_iso = as_iso_date(made)
+            if made_iso is None and as_iso_date(resolves_by) is None:
                 continue
             # Open calls are the ones the ledger says are not yet resolved.
             if status_value.strip().lower() in _RESOLVED_STATES:
                 continue
-            text = call[:120] + ("…" if len(call) > 120 else "")
             out.append(
                 Candidate(
                     producer=WEEK_AHEAD,
                     kind="open_call",
-                    summary=text,
+                    summary=truncate(call, 120),
                     source_path=str(path.resolve()),
-                    as_of=res_iso or made_iso,
+                    # The record's own date — the Made date, or the ledger's
+                    # mtime when the row carries no date at all. Never the
+                    # future ``Resolves by`` deadline.
+                    as_of=made_iso or file_mtime_iso(path),
                 )
             )
             continue
@@ -99,17 +103,6 @@ def _read_calls(path: Path) -> list[Candidate]:
         if in_table and not line.startswith("|"):
             in_table = False
     return out
-
-
-def _as_iso_date(value: str) -> str | None:
-    """Return ``YYYY-MM-DDT00:00:00Z`` for an ISO date, else None."""
-    value = value.strip()
-    if not value:
-        return None
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", value)
-    if m is None:
-        return None
-    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}T00:00:00Z"
 
 
 def _read_beats(path: Path) -> list[tuple[str, str | None]]:
@@ -157,8 +150,10 @@ def _write_beat_proposals(
         for name, weight in proposals:
             if not name:
                 continue
+            # ``IS ?`` compares NULL to NULL as equal; ``= ?`` never matches a
+            # NULL rationale, so a beat without a Weight line would insert twice.
             existing = conn.execute(
-                "SELECT id FROM beats_proposals WHERE proposal = ? AND rationale = ?",
+                "SELECT id FROM beats_proposals WHERE proposal = ? AND rationale IS ?",
                 (name, weight),
             ).fetchone()
             if existing is not None:

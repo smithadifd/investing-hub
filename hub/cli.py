@@ -320,17 +320,18 @@ def _open_existing(name: str, db: Path) -> sqlite3.Connection | int:
 
 
 def _producers_list_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
     parser.add_argument(
         "--mv-analyst-root",
         type=Path,
         default=producers.DEFAULT_MV_ANALYST_ROOT,
-        help="mv-analyst checkout (default: %(default)s)",
+        help="mv-analyst home directory (default: %(default)s)",
     )
     parser.add_argument(
         "--week-ahead-root",
         type=Path,
         default=producers.DEFAULT_WEEK_AHEAD_ROOT,
-        help="week-ahead checkout (default: %(default)s)",
+        help="week-ahead home directory (default: %(default)s)",
     )
     parser.add_argument(
         "--triage-queue-dir",
@@ -341,12 +342,23 @@ def _producers_list_args(parser: argparse.ArgumentParser) -> None:
 
 
 def cmd_producers_list(args: argparse.Namespace) -> int:
-    """List every candidate every producer would emit against the given roots."""
-    reports = producers.status_reports(
-        mv_analyst_root=args.mv_analyst_root,
-        week_ahead_root=args.week_ahead_root,
-        triage_queue_dir=args.triage_queue_dir,
-    )
+    """List the candidates the producers yield, advancing the hub store's read cursor."""
+    name = "producers list"
+    try:
+        conn = _open_existing(name, args.db)
+        if isinstance(conn, int):
+            return conn
+        try:
+            reports = producers.status_reports(
+                mv_analyst_root=args.mv_analyst_root,
+                week_ahead_root=args.week_ahead_root,
+                triage_queue_dir=args.triage_queue_dir,
+                conn=conn,
+            )
+        finally:
+            conn.close()
+    except (store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
     for report in reports:
         print(f"{report.producer}: {report.status} — {report.count} candidate(s)")
         for candidate in report.candidates:
