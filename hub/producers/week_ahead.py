@@ -1,21 +1,31 @@
 """week-ahead adapter — read-only against ``ledger/calls.md`` and ``beats.md``.
 
-Open call rows in the ledger become candidates. The ``## Beats`` section in
-``beats.md`` is parsed for its headings; each beat becomes a ``beats_proposals``
-row when a database connection is supplied. Week-ahead's own ``beats.md`` is
-never written by this adapter — the proposal table is the only place a proposed
+Open call rows in the ledger become candidates. ``beats.md`` is read through
+week-ahead's own reference reader (``scripts/read_beats.py --json``; the read
+contract is that repo's ``docs/beats-schema.md``) rather than parsed here —
+beats.md is hand-written prose with a convention, and two parsers of
+hand-written prose disagree eventually, so the hub calls the one shipped
+reader across the repo boundary. Each beat the reader returns becomes a
+``beats_proposals`` row when a database connection is supplied, and the
+reader's warnings and duplicate-name ambiguities surface in the producer
+status line rather than being dropped. Week-ahead's own ``beats.md`` is never
+written by this adapter — the proposal table is the only place a proposed
 beat lives, exactly as the row contract says.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 from hub.producers.common import (
     DEFAULT_WEEK_AHEAD_ROOT,
     STATUS_ABSENT,
+    STATUS_DEGRADED,
     STATUS_EMPTY,
     STATUS_OK,
     WEEK_AHEAD,
@@ -25,6 +35,10 @@ from hub.producers.common import (
     file_mtime_iso,
     truncate,
 )
+
+# The reader is a subprocess the hub waits on; without a cap a hung read would
+# hang every `hub producers list` and every session-open with it.
+_READER_TIMEOUT = 30  # seconds
 
 # week-ahead's ``ledger/calls.md`` is the SoT the revise stage appends to; the rows follow
 # the ``Made | Call | Resolves by | Status | Resolution`` shape the
@@ -51,17 +65,25 @@ def week_ahead_candidates(
     if not ledger.is_dir():
         return ProducerReport(producer=WEEK_AHEAD, candidates=[], status=STATUS_EMPTY)
     candidates: list[Candidate] = []
-    proposals: list[tuple[str, str | None]] = []
+    notes: list[str] = []
+    degraded = False
     calls_path = ledger / "calls.md"
     if calls_path.is_file():
         candidates.extend(_read_calls(calls_path))
-    beats_path = base / "beats.md"
-    if beats_path.is_file():
-        proposals.extend(_read_beats(beats_path))
+    proposals, reader_notes, reader_degraded = _read_beats(base)
+    notes.extend(reader_notes)
+    degraded = degraded or reader_degraded
     if conn is not None and proposals:
         _write_beat_proposals(conn, proposals)
-    status = STATUS_EMPTY if not candidates else STATUS_OK
-    return ProducerReport(producer=WEEK_AHEAD, candidates=candidates, status=status)
+    if degraded:
+        status = STATUS_DEGRADED
+    elif not candidates:
+        status = STATUS_EMPTY
+    else:
+        status = STATUS_OK
+    return ProducerReport(
+        producer=WEEK_AHEAD, candidates=candidates, status=status, notes=tuple(notes)
+    )
 
 
 def _read_calls(path: Path) -> list[Candidate]:
@@ -105,40 +127,60 @@ def _read_calls(path: Path) -> list[Candidate]:
     return out
 
 
-def _read_beats(path: Path) -> list[tuple[str, str | None]]:
-    """Each ``### <name>`` heading under ``## Beats`` becomes one proposed beat.
+def _read_beats(base: Path) -> tuple[list[tuple[str, str | None]], list[str], bool]:
+    """Read ``beats.md`` through week-ahead's reference reader.
 
-    The brief schema is prose-with-a-convention (see week-ahead's
-    ``docs/beats-schema.md``); the only structured field we touch here is the
-    heading, and the rationale is whatever ``Weight:`` line we can find under it.
+    Returns ``(proposals, notes, degraded)``: one ``(name, weight)`` proposal
+    per beat the reader parsed, its warnings as notes, and whether the read
+    failed. The reader's contract defines exits 0 (read), 3 (absent — an
+    optional dependency, so a note, not a failure) and 4 (malformed); a missing
+    script, a timeout, invalid JSON or any other outcome is a broken read path
+    — degraded and loud, no proposals — and none of them may raise: the ledger
+    candidates still ship.
     """
-    out: list[tuple[str, str | None]] = []
-    in_beats = False
-    current_name: str | None = None
-    current_weight: str | None = None
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.rstrip()
-        if line.startswith("## "):
-            in_beats = line.strip().lower() == "## beats"
-            current_name = None
-            current_weight = None
+    beats_path = base / "beats.md"
+    if not beats_path.is_file():
+        return [], [f"beats.md absent at {beats_path} — no beat proposals"], False
+    reader = base / "scripts" / "read_beats.py"
+    if not reader.is_file():
+        return [], [f"beats reader missing at {reader} — no beat proposals"], True
+    cmd = [sys.executable, str(reader), "--json", "--quiet", "--path", str(beats_path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_READER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return (
+            [],
+            [f"beats reader timed out after {_READER_TIMEOUT}s — no beat proposals"],
+            True,
+        )
+    except OSError as exc:
+        return [], [f"beats reader failed: {exc} — no beat proposals"], True
+    if proc.returncode != 0:
+        detail = (proc.stderr.strip() or "no detail").splitlines()[0]
+        return (
+            [],
+            [f"beats reader exit {proc.returncode}: {detail} — no beat proposals"],
+            proc.returncode != 3,
+        )
+    try:
+        doc = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return [], ["beats reader emitted invalid JSON — no beat proposals"], True
+    if not isinstance(doc, dict):
+        return [], ["beats reader emitted invalid JSON — no beat proposals"], True
+    proposals: list[tuple[str, str | None]] = []
+    for beat in doc.get("beats", []):
+        if not isinstance(beat, dict):
             continue
-        if not in_beats:
+        name = str(beat.get("name", "")).strip()
+        if not name:
             continue
-        if line.startswith("### ") and not line.startswith("####"):
-            if current_name is not None:
-                out.append((current_name, current_weight))
-            current_name = line[4:].strip()
-            current_weight = None
-            continue
-        if current_name is None:
-            continue
-        m = re.match(r"^Weight:\s*(.+)$", line.strip(), re.IGNORECASE)
-        if m is not None:
-            current_weight = m.group(1).strip()
-    if current_name is not None:
-        out.append((current_name, current_weight))
-    return out
+        # ``weight_raw`` is the writer's own Weight line; an out-of-vocabulary
+        # or missing weight normalises to None, never to a fabricated default.
+        weight = str(beat.get("weight_raw", "")).strip() or None
+        proposals.append((name, weight))
+    notes = [f"warn: beats: {w}" for w in doc.get("warnings", []) if str(w).strip()]
+    return proposals, notes, False
 
 
 def _write_beat_proposals(

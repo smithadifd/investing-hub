@@ -7,19 +7,23 @@ is read-only: we never modify, move or truncate the jsonl files, and a smoke
 test in ``tests/test_producers.py`` asserts those bytes and mtime are unchanged
 after a read.
 
-The cursor is keyed by the absolute source path and stores three things: the
-byte offset of the last complete newline consumed, the file's size, and a
-content identity — a hash of the file's first bytes. Only complete lines are
-consumed, so a final line still being appended is read once, when its newline
-lands. If the identity changes (the file was rotated or rewritten, even to the
-same size) or the file shrank below the offset (truncated), the read restarts
-from zero — that is a real signal, not a regression.
+The cursor is keyed by the absolute source path and stores four things: the
+byte offset of the last complete newline consumed, the file's size, its mtime,
+and a content identity — the file's inode and device plus a hash of its first
+line. Only complete lines are consumed, so a final line still being appended
+is read once, when its newline lands. The file is treated as replaced — and
+the read restarts from zero — when the identity changes (a rotation, or any
+rewrite that moved the file), when the file shrinks below the offset
+(truncation), or when the size is unchanged but the mtime moved (an in-place
+rewrite that kept line 1). A pure append — same inode, size grown, line 1
+untouched — resumes from the offset, exactly as before.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import BinaryIO
@@ -64,23 +68,19 @@ def _browse_one(path: Path, conn: sqlite3.Connection | None) -> list[Candidate]:
     """One jsonl file's worth of new candidates, cursor-aware.
 
     The cursor holds the byte offset of the last complete newline consumed plus
-    the file's content identity. The offset never advances past an incomplete
-    final line, so a record being appended right now is read exactly once, when
-    its newline lands. A different identity (rotation, or an in-place rewrite
-    that keeps the same size) or a size below the offset (truncation) restarts
-    the file from zero.
+    the file's identity. The offset never advances past an incomplete final
+    line, so a record being appended right now is read exactly once, when its
+    newline lands. A replaced file (a rotation, a truncation below the offset,
+    or an in-place rewrite that kept line 1 and the size) restarts from zero.
     """
     stat = path.stat()
     size = stat.st_size
     mtime = stat.st_mtime_ns
     key = str(path.resolve())
     with open(path, "rb") as fh:
-        identity = _file_identity(fh)
+        identity = _file_identity(fh, stat)
         cursor = _read_cursor(conn, key) if conn is not None else None
-        if cursor is None or cursor[0] > size or cursor[1] != identity:
-            offset = 0
-        else:
-            offset = cursor[0]
+        offset = 0 if _is_replacement(cursor, size, mtime, identity) else cursor[0]
         fh.seek(offset)
         tail = fh.read()
     # Only complete lines count: a final line without its newline is a record
@@ -100,17 +100,46 @@ def _browse_one(path: Path, conn: sqlite3.Connection | None) -> list[Candidate]:
     return out
 
 
-def _file_identity(fh: BinaryIO) -> str:
-    """A hash of the file's first line — its identity across appends and rotations.
+def _is_replacement(
+    cursor: tuple[int, str | None, int, int] | None,
+    size: int,
+    mtime: int,
+    identity: str,
+) -> bool:
+    """True when the stored cursor cannot be trusted to resume from its offset.
+
+    Three replacement signals, each covering a case the others cannot see:
+
+    * the offset is past the end of the file — it was truncated or rolled over
+      to something smaller, so the offset points into a different file's bytes;
+    * the identity moved — a rotation or any rewrite that replaced the file
+      (new inode), or one that changed line 1;
+    * the size is unchanged but the mtime moved — an in-place rewrite that kept
+      line 1 and the byte count; the first-line hash alone cannot see it, which
+      is exactly the rewrite a positions board or a queue editor produces.
+    """
+    if cursor is None:
+        return True
+    offset, stored_identity, stored_size, stored_mtime = cursor
+    if offset > size:
+        return True
+    if stored_identity != identity:
+        return True
+    return size == stored_size and mtime != stored_mtime
+
+
+def _file_identity(fh: BinaryIO, stat: os.stat_result) -> str:
+    """The file's inode and device, plus a hash of its first line.
 
     The first line, not the first N bytes: an append grows the file, and a
     fixed-size window eventually swallows the appended records, which would
-    flip the identity on every append and replay the whole file. The first
-    line is stable under appends and changes on any real rotation; a rotation
-    that reproduces the first line byte-for-byte is indistinguishable on purpose.
+    flip the identity on every append and replay the whole file. The inode and
+    device separate a rewrite that replaced the file from an append to it even
+    when line 1 survives byte-for-byte; the same-size, same-inode rewrite is
+    left to the mtime check in ``_is_replacement``.
     """
     fh.seek(0)
-    return hashlib.sha256(fh.readline()).hexdigest()
+    return f"{stat.st_dev}:{stat.st_ino}:{hashlib.sha256(fh.readline()).hexdigest()}"
 
 
 def _parse_records(data: bytes, path: Path) -> list[Candidate]:
@@ -143,15 +172,18 @@ def _parse_records(data: bytes, path: Path) -> list[Candidate]:
     return out
 
 
-def _read_cursor(conn: sqlite3.Connection, source_path: str) -> tuple[int, str | None] | None:
-    """The stored ``(offset, identity)`` for one source file, or None."""
+def _read_cursor(
+    conn: sqlite3.Connection, source_path: str
+) -> tuple[int, str | None, int, int] | None:
+    """The stored ``(offset, identity, size, mtime)`` for one source file, or None."""
     row = conn.execute(
-        "SELECT last_read_size, file_identity FROM producer_cursors WHERE source_path = ?",
+        "SELECT last_read_size, file_identity, file_size, file_mtime"
+        " FROM producer_cursors WHERE source_path = ?",
         (source_path,),
     ).fetchone()
     if row is None:
         return None
-    return int(row[0]), row[1]
+    return int(row[0]), row[1], int(row[2]), int(row[3])
 
 
 def _write_cursor(

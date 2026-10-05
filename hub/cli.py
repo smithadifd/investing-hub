@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from hub import custodian, ic, importer, preflight, producers, restore, session_open, store
+from hub.producers.common import truncate
 
 
 def _db_path_arg(parser: argparse.ArgumentParser) -> None:
@@ -360,7 +361,8 @@ def cmd_producers_list(args: argparse.Namespace) -> int:
     except (store.StoreError, sqlite3.Error, OSError) as exc:
         return _fail(name, exc)
     for report in reports:
-        print(f"{report.producer}: {report.status} — {report.count} candidate(s)")
+        notes = f" — {truncate('; '.join(report.notes))}" if report.notes else ""
+        print(f"{report.producer}: {report.status} — {report.count} candidate(s){notes}")
         for candidate in report.candidates:
             print(f"  {candidate.kind} @ {candidate.as_of}")
             print(f"    {candidate.summary}")

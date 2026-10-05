@@ -19,6 +19,7 @@ from pathlib import Path
 import yaml
 
 from hub import ic, producers, store
+from hub.producers.common import truncate
 
 DEFAULT_STALE_DAYS = 30
 CONFIG_SECTION = "session_open"
@@ -50,7 +51,7 @@ def _age(then: datetime, now: datetime) -> str:
 
 def _first_line(text: str) -> str:
     line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    return line if len(line) <= _TITLE_WIDTH else line[: _TITLE_WIDTH - 1] + "…"
+    return line if len(line) <= _TITLE_WIDTH else line[: _TITLE_WIDTH - 3] + "..."
 
 
 def resolve_stale_days(flag: int | None, config_path: Path = ic.CONFIG_FILE) -> tuple[int, str]:
@@ -201,7 +202,10 @@ def _producers_section(
         as_of = max((c.as_of for c in report.candidates), default="")
         as_of_text = f" latest {as_of}" if as_of else ""
         count_text = f"{report.count} candidate" if report.count != 1 else "1 candidate"
-        lines.append(f"producer {report.producer}: {report.status} — {count_text}{as_of_text}")
+        notes = f" — {truncate('; '.join(report.notes))}" if report.notes else ""
+        lines.append(
+            f"producer {report.producer}: {report.status} — {count_text}{as_of_text}{notes}"
+        )
     return lines
 
 

@@ -7,17 +7,20 @@ Three contracted sources besides the episode watch, each yielding candidates:
   Overdue, Open-with-a-date and Open-undated sections; ``as_of`` is the row's
   ``Made`` date, never the future ``Resolves by`` deadline. The Scorecard and
   Resolved sections are history, not candidates.
-* ``index/attention.md`` — the generated attention view. One candidate per beat
-  under its weight heading (``lead``/``standing``/``watch``/``skip``); the view
-  carries no dates, so ``as_of`` is the file's mtime.
+* ``index/themes.md`` — the CURATED positions board (who stands where on each
+  axis, and against whom; stage 3 maintains it, ``build_index.py`` never
+  touches it). One candidate per axis block, carrying who holds positions on
+  it, ``as_of`` the newest date on the board's own rows (the file's mtime when
+  the block carries none). The ``themes:`` front-matter below stays as
+  supporting context; the board is the curated source. A missing board yields
+  ``status = degraded`` with a note naming it — never an exception.
 * ``analysis/*-analysis.md`` — the ``themes:`` front-matter every episode
   analysis carries. One candidate per analysed episode with its theme tags,
   ``as_of`` the episode's ``date:``.
 
-``state/done/mv<ep>`` markers stay as the episode watch: one candidate per
-completed episode, ``as_of`` the ISO timestamp inside the marker. A missing root
-yields zero candidates and ``status = absent``; a root with nothing to read
-yields ``empty`` — never an exception.
+A missing root yields zero candidates and ``status = absent``; a root with
+nothing to read yields ``empty``; a root whose positions board is missing
+yields ``degraded`` — never an exception.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from hub.producers.common import (
     DEFAULT_MV_ANALYST_ROOT,
     MV_ANALYST,
     STATUS_ABSENT,
+    STATUS_DEGRADED,
     STATUS_EMPTY,
     STATUS_OK,
     Candidate,
@@ -52,6 +56,13 @@ _CALL_SECTIONS = {
     "open, with no resolution date": "open_call",
 }
 _TABLE_SEPARATOR = re.compile(r"^[\s:|-]*$")
+# An axis block on the curated positions board: `## Title`, a `` `slug` `` line
+# sharing the fixed theme vocabulary with the analysis `themes:` front-matter,
+# then position rows and commentary. Same shape stage 3 curates and
+# mv-analyst's own ``build_beat_view.py`` reads.
+_THEMES_BLOCK = re.compile(r"^## (.+?)\s*\n`([a-z0-9-]+)`\s*\n(.*?)(?=^## |\Z)", re.M | re.S)
+_THEMES_ROW_SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
+_THEMES_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def mv_analyst_candidates(root: Path | str | None = None) -> ProducerReport:
@@ -60,6 +71,7 @@ def mv_analyst_candidates(root: Path | str | None = None) -> ProducerReport:
     if not base.is_dir():
         return ProducerReport(producer=MV_ANALYST, candidates=[], status=STATUS_ABSENT)
     candidates: list[Candidate] = []
+    notes: list[str] = []
     candidates.extend(_episode_done_candidates(base))
     calls_index = base / "index" / "calls.md"
     if calls_index.is_file():
@@ -67,9 +79,21 @@ def mv_analyst_candidates(root: Path | str | None = None) -> ProducerReport:
     attention_index = base / "index" / "attention.md"
     if attention_index.is_file():
         candidates.extend(_read_attention_index(attention_index))
+    themes_board = base / "index" / "themes.md"
+    if themes_board.is_file():
+        candidates.extend(_read_themes_board(themes_board))
+    else:
+        notes.append("index/themes.md missing — the curated positions board is the themes source")
     candidates.extend(_read_analysis_themes(base))
-    status = STATUS_EMPTY if not candidates else STATUS_OK
-    return ProducerReport(producer=MV_ANALYST, candidates=candidates, status=status)
+    if notes:
+        status = STATUS_DEGRADED
+    elif not candidates:
+        status = STATUS_EMPTY
+    else:
+        status = STATUS_OK
+    return ProducerReport(
+        producer=MV_ANALYST, candidates=candidates, status=status, notes=tuple(notes)
+    )
 
 
 def _episode_done_candidates(base: Path) -> list[Candidate]:
@@ -183,6 +207,58 @@ def _read_attention_index(path: Path) -> list[Candidate]:
             )
         )
     return out
+
+
+def _read_themes_board(path: Path) -> list[Candidate]:
+    """One candidate per axis block in ``index/themes.md`` — the positions board.
+
+    Each block is one axis: its title, its slug from the shared theme
+    vocabulary, and the position rows saying who stands where on it. The
+    candidate carries who holds positions so a cross-guest change on the board
+    moves the summary; ``as_of`` is the newest date on the block's own rows,
+    the file's mtime when the block carries none.
+    """
+    fallback = file_mtime_iso(path)
+    out: list[Candidate] = []
+    for match in _THEMES_BLOCK.finditer(path.read_text(encoding="utf-8", errors="replace")):
+        title, slug, body = match.group(1).strip(), match.group(2), match.group(3)
+        rows = _board_rows(body)
+        if rows:
+            guests = ", ".join(row["guest"] for row in rows if row["guest"])
+            summary = f"{title} ({slug}): {len(rows)} position(s) — {guests}"
+        else:
+            summary = f"{title} ({slug}): no readable position rows"
+        dates = sorted({date for row in rows for date in _THEMES_DATE.findall(row["cells"])})
+        as_of = as_iso_date(dates[-1]) if dates else None
+        out.append(
+            Candidate(
+                producer=MV_ANALYST,
+                kind="theme_axis",
+                summary=truncate(summary),
+                source_path=str(path.resolve()),
+                as_of=as_of or fallback,
+            )
+        )
+    return out
+
+
+def _board_rows(body: str) -> list[dict[str, str]]:
+    """The position rows of one axis block: ``| Guest | Position | Since | Episode |``.
+
+    Tolerant on purpose, the same way mv-analyst's own board reader is: the
+    header and separator rows are skipped, a row short of the four cells the
+    board's shape needs is skipped, and nothing is guessed at.
+    """
+    rows: list[dict[str, str]] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line.startswith("|") or _THEMES_ROW_SEPARATOR.match(line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 4 or cells[0].lower() == "guest":
+            continue
+        rows.append({"guest": cells[0], "cells": " ".join(cells[1:])})
+    return rows
 
 
 def _read_analysis_themes(base: Path) -> list[Candidate]:

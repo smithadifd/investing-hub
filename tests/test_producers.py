@@ -8,6 +8,7 @@ the next test or into a committed fixture.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -103,6 +104,10 @@ def test_mv_analyst_missing_root_is_absent_not_exception(tmp_path):
 def test_mv_analyst_empty_done_dir_is_empty(tmp_path):
     empty = tmp_path / "mv-analyst-empty"
     (empty / "state" / "done").mkdir(parents=True)
+    # A present-but-empty positions board: the root is complete, it just has
+    # nothing to say. A root WITHOUT the board is degraded, tested below.
+    (empty / "index").mkdir()
+    (empty / "index" / "themes.md").write_text("# synthetic board\n")
     report = producers.mv_analyst_candidates(empty)
     assert report.status == producers.STATUS_EMPTY
     assert report.candidates == []
@@ -116,6 +121,8 @@ def test_mv_analyst_malformed_marker_is_skipped_not_a_failure(tmp_path):
     (done / "garbage").write_text("not a marker")  # name rejected
     (done / "mv000").write_text("2026-02-05T10:00:00+0000")  # episode 0 rejected
     (done / "mv904").write_text("not a timestamp")  # content rejected
+    (broken / "index").mkdir()
+    (broken / "index" / "themes.md").write_text("# synthetic board, no axis blocks\n")
     report = producers.mv_analyst_candidates(broken)
     assert report.status == producers.STATUS_OK
     assert [c.summary for c in report.candidates] == ["MV903 analysis ready"]
@@ -180,6 +187,64 @@ def test_mv_analyst_analysis_themes_yield_candidates(copy_fixtures):
         assert candidate.source_path.endswith("-analysis.md")
 
 
+def test_mv_analyst_themes_board_yields_one_candidate_per_axis(copy_fixtures):
+    report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
+    board = [c for c in report.candidates if c.kind == "theme_axis"]
+    assert sorted(c.summary for c in board) == [
+        # An axis block with no rows is a real board state, still one candidate.
+        "Gold as reserve asset (gold-reserve-asset): no readable position rows",
+        "The inflation path (inflation-path): 1 position(s) — Fixture Guest B",
+        "The long end (long-end-yields): 2 position(s) — Fixture Guest A, Fixture Guest C",
+    ]
+    by_summary = {c.summary: c.as_of for c in board}
+    # as_of is the newest date on the block's own rows, not the file's mtime.
+    assert (
+        by_summary[
+            "The long end (long-end-yields): 2 position(s) — Fixture Guest A, Fixture Guest C"
+        ]
+        == "2026-01-22T00:00:00Z"
+    )
+    assert (
+        by_summary["The inflation path (inflation-path): 1 position(s) — Fixture Guest B"]
+        == "2026-01-22T00:00:00Z"
+    )
+    # No date on the gold block, so the board file's mtime is the provenance.
+    assert by_summary["Gold as reserve asset (gold-reserve-asset): no readable position rows"]
+    for candidate in board:
+        assert candidate.source_path.endswith("index/themes.md")
+
+
+def test_mv_analyst_changed_board_position_yields_a_changed_candidate(copy_fixtures):
+    """A cross-guest position change on the board moves a candidate, not silence."""
+    board_path = copy_fixtures["mv_analyst_root"] / "index" / "themes.md"
+    board_path.write_text(
+        board_path.read_text(encoding="utf-8").replace(
+            "Fixture Guest C | The long end is priced for scarcity, not default",
+            "Fixture Guest C | The long end is now a scarcity default, revised stance",
+        )
+    )
+    report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
+    long_end = next(
+        c for c in report.candidates if c.kind == "theme_axis" and "long-end" in c.summary
+    )
+    assert "Fixture Guest C" in long_end.summary
+    # The front-matter tags alone say nothing about who stands where; the
+    # board is the source that moved.
+    assert any(c.kind == "episode_themes" for c in report.candidates)
+
+
+def test_mv_analyst_missing_themes_board_is_degraded_not_a_crash(tmp_path):
+    root = tmp_path / "mv-analyst-no-board"
+    (root / "state" / "done").mkdir(parents=True)
+    (root / "index").mkdir()
+    (root / "index" / "calls.md").write_text("# synthetic calls, no rows\n")
+    report = producers.mv_analyst_candidates(root)
+    assert report.status == producers.STATUS_DEGRADED
+    assert report.candidates == []
+    assert len(report.notes) == 1
+    assert "index/themes.md missing" in report.notes[0]
+
+
 # --- week-ahead --------------------------------------------------------------------------------
 
 
@@ -235,8 +300,8 @@ def test_week_ahead_beat_without_weight_inserts_once_across_two_reads(copy_fixtu
     conn, _db_path = fresh_db
     beats_path = copy_fixtures["week_ahead_root"] / "beats.md"
     beats_path.write_text(
-        beats_path.read_text(encoding="utf-8")
-        + "\n### Unweighted fixture beat\nNo Weight line under this heading.\n"
+        beats_path.read_text(encoding="utf-8") + "\n### Unweighted fixture beat\n"
+        "What I care about: a synthetic beat with no Weight line.\n"
     )
     producers.week_ahead_candidates(copy_fixtures["week_ahead_root"], conn=conn)
     producers.week_ahead_candidates(copy_fixtures["week_ahead_root"], conn=conn)
@@ -249,6 +314,70 @@ def test_week_ahead_beat_without_weight_inserts_once_across_two_reads(copy_fixtu
     # A NULL rationale must still dedup: `= NULL` never matches an existing row.
     assert len(rows) == 1
     assert rows[0]["rationale"] is None
+
+
+def test_week_ahead_beats_are_read_via_the_reference_reader_not_parsed_locally(
+    copy_fixtures, fresh_db
+):
+    """The proposals come from ``scripts/read_beats.py`` output across the boundary.
+
+    The stub reader emits a beat that exists nowhere in ``beats.md``: only a
+    hub that consumes the reader's output can store it, and a hub with its own
+    parser cannot.
+    """
+    conn, _db_path = fresh_db
+    root = copy_fixtures["week_ahead_root"]
+    reader = root / "scripts" / "read_beats.py"
+    reader.write_text(
+        "import json\n"
+        'print(json.dumps({"beats": [{"name": "Reader-side beat",'
+        ' "weight_raw": "watch"}], "warnings": []}))\n',
+        encoding="utf-8",
+    )
+    report = producers.week_ahead_candidates(root, conn=conn)
+    assert report.status == producers.STATUS_OK
+    rows = list(conn.execute("SELECT proposal, rationale FROM beats_proposals"))
+    assert [tuple(r) for r in rows] == [("Reader-side beat", "watch")]
+
+
+def test_week_ahead_reader_warnings_surface_in_the_status_notes(copy_fixtures):
+    report = producers.week_ahead_candidates(copy_fixtures["week_ahead_root"])
+    assert report.status == producers.STATUS_OK
+    # The fixture beats.md duplicates all three names; the reference reader
+    # keeps both and warns, and the hub passes the warning through instead of
+    # quietly collapsing the collision into one stored row.
+    assert sum("duplicate name" in note for note in report.notes) == 3
+
+
+def test_week_ahead_missing_reader_script_is_degraded_with_no_proposals(copy_fixtures, fresh_db):
+    conn, _db_path = fresh_db
+    root = copy_fixtures["week_ahead_root"]
+    (root / "scripts" / "read_beats.py").unlink()
+    report = producers.week_ahead_candidates(root, conn=conn)
+    assert report.status == producers.STATUS_DEGRADED
+    assert report.notes and "reader missing" in report.notes[0]
+    # The ledger candidates still ship; only the beats read failed.
+    assert {c.summary for c in report.candidates} == {
+        "Synthetic call A — threshold for fixture",
+        "Synthetic call C — also open",
+    }
+    rows = list(conn.execute("SELECT proposal FROM beats_proposals"))
+    assert rows == []
+
+
+def test_week_ahead_failing_reader_is_degraded_with_no_proposals(copy_fixtures, fresh_db):
+    conn, _db_path = fresh_db
+    root = copy_fixtures["week_ahead_root"]
+    (root / "scripts" / "read_beats.py").write_text(
+        "import sys\nsys.stderr.write('beats: MALFORMED - synthetic failure\\n')\nsys.exit(4)\n",
+        encoding="utf-8",
+    )
+    report = producers.week_ahead_candidates(root, conn=conn)
+    assert report.status == producers.STATUS_DEGRADED
+    assert "beats reader exit 4" in report.notes[0]
+    assert "synthetic failure" in report.notes[0]
+    rows = list(conn.execute("SELECT proposal FROM beats_proposals"))
+    assert rows == []
 
 
 def test_week_ahead_does_not_write_beats_md():
@@ -379,6 +508,46 @@ def test_triage_queue_same_size_rotation_yields_new_records(copy_fixtures, fresh
     assert [c.summary for c in second.candidates] == ["primary — Rotated record"]
 
 
+def test_triage_queue_same_size_rewrite_keeping_line_1_yields_changed_records(
+    copy_fixtures, fresh_db
+):
+    """An in-place rewrite that keeps line 1 and the size is still a replacement.
+
+    The first-line hash alone cannot see it — line 1 is untouched — so the
+    cursor must also treat a same-size mtime change as a rewrite and restart
+    from zero rather than resuming past the changed records.
+    """
+    conn, _db_path = fresh_db
+    path = copy_fixtures["triage_queue_dir"] / "primary.jsonl"
+    first = producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    assert len(first.candidates) == 3
+    lines = path.read_bytes().splitlines(keepends=True)
+    replacement = json.dumps(
+        {
+            "queued": "2026-02-02T09:30:00+00:00",
+            "account": "primary",
+            "message_id": "msg-002",
+            "sender": "Fixture Sender B",
+            "subject": "Rewritten record B",
+            "source_rule": "fixture-rule-b",
+        }
+    ).encode()
+    padding = len(lines[1]) - len(replacement) - 1  # trailing spaces keep the size
+    assert padding >= 0
+    path.write_bytes(lines[0] + replacement + b" " * padding + b"\n" + lines[2])
+    assert path.stat().st_size == sum(len(line) for line in lines)
+    # Same inode, same size, same first line: force the mtime to move the way
+    # any real rewrite does, deterministically rather than at ns resolution.
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    second = producers.triage_queue_candidates(copy_fixtures["triage_queue_dir"], conn=conn)
+    assert [c.summary for c in second.candidates] == [
+        "primary — Synthetic triage record A",
+        "primary — Rewritten record B",
+        "primary — Synthetic triage record C",
+    ]
+
+
 def test_triage_queue_never_modifies_the_jsonl_files(copy_fixtures, fresh_db):
     conn, _db_path = fresh_db
     path = copy_fixtures["triage_queue_dir"] / "primary.jsonl"
@@ -478,7 +647,7 @@ def test_hub_producers_list_prints_every_candidate(copy_fixtures, fresh_db, caps
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "mv-analyst: ok — 10 candidate(s)" in out
+    assert "mv-analyst: ok — 13 candidate(s)" in out
     assert "week-ahead: ok — 2 candidate(s)" in out
     assert "triage-queue: ok — 3 candidate(s)" in out
     assert "MV901 analysis ready" in out

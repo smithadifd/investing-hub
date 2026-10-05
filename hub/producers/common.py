@@ -25,6 +25,10 @@ DEFAULT_TRIAGE_QUEUE_DIR = Path.home() / "brief" / "investing-triage-queue"
 STATUS_OK = "ok"
 STATUS_ABSENT = "absent"
 STATUS_EMPTY = "empty"
+# One contracted source could not be read (a missing positions board, a failed
+# beats reader): the other sources still yielded candidates, and the failure is
+# said out loud in the status line rather than folded into "ok".
+STATUS_DEGRADED = "degraded"
 
 
 def as_iso_date(value: str) -> str | None:
@@ -65,11 +69,18 @@ class Candidate:
 
 @dataclass(frozen=True)
 class ProducerReport:
-    """The full read of one producer: its candidates plus a status for session-open."""
+    """The full read of one producer: its candidates plus a status for session-open.
+
+    ``notes`` carry what a plain count cannot: a source that was missing or
+    failed, or a producer-side warning worth reading (an ambiguous duplicate
+    beat name). Session-open and ``hub producers list`` fold them into the one
+    status line per producer instead of dropping them.
+    """
 
     producer: str
     candidates: list[Candidate]
     status: str
+    notes: tuple[str, ...] = ()
 
     @property
     def count(self) -> int:
