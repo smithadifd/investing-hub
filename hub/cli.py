@@ -551,8 +551,7 @@ def _pulse_write_args(parser: argparse.ArgumentParser) -> None:
         "--model",
         default=None,
         metavar="MODEL",
-        help=f"record the model that would be invoked (default: {pulse.DEFAULT_MODEL});"
-        " no network call is made",
+        help=f"model the drafter should use (default: {pulse.DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--ask-threshold",
@@ -570,8 +569,37 @@ def _pulse_write_args(parser: argparse.ArgumentParser) -> None:
         help=f"score below which an item is ignored (default: {pulse.DEFAULT_MIN_SCORE})",
     )
     parser.add_argument(
-        "--dry-run", action="store_true", help="print the draft instead of writing it"
+        "--dry-run",
+        action="store_true",
+        help="print the Stage 0 evidence and the deterministic skeleton"
+        " instead of writing the file",
     )
+
+
+def _pulse_provenance(result: pulse.PulseResult, model: str) -> str:
+    return (
+        f"pulse: model={model}"
+        f" date={result.date.isoformat()}"
+        f" high_bar={len(result.high_bar)}"
+        f" worth_discussing={len(result.worth_discussing)}"
+        f" quiet={'yes' if result.quiet else 'no'}"
+    )
+
+
+def _print_dry_run(result: pulse.PulseResult, model: str) -> None:
+    print("Stage 0 evidence:")
+    if result.high_bar:
+        print("  high-bar items:")
+        for item in result.high_bar:
+            print(f"    - {item.subject} ({item.detail}; score {item.score:.2f})")
+    if result.worth_discussing:
+        print("  worth-discussing items:")
+        for item in result.worth_discussing:
+            print(f"    - {item.subject} ({item.detail}; score {item.score:.2f})")
+    if not result.high_bar and not result.worth_discussing:
+        print("  (no qualifying items)")
+    print("Deterministic draft:")
+    print(pulse.compose_deterministic(result))
 
 
 def cmd_pulse_write(args: argparse.Namespace) -> int:
@@ -588,9 +616,7 @@ def cmd_pulse_write(args: argparse.Namespace) -> int:
     if not args.db.is_file():
         return _fail(name, f"database not found: {args.db} (run `hub db init`)")
     ask_threshold = (
-        args.ask_threshold
-        if args.ask_threshold is not None
-        else pulse.DEFAULT_ASK_THRESHOLD
+        args.ask_threshold if args.ask_threshold is not None else pulse.DEFAULT_ASK_THRESHOLD
     )
     min_score = args.min_score if args.min_score is not None else pulse.DEFAULT_MIN_SCORE
     model = args.model if args.model is not None else pulse.DEFAULT_MODEL
@@ -600,17 +626,20 @@ def cmd_pulse_write(args: argparse.Namespace) -> int:
             result = pulse.collect_pulse(
                 conn, on=on, ask_threshold=ask_threshold, min_score=min_score
             )
-            text = pulse.compose(result, model=model)
         finally:
             conn.close()
     except (pulse.PulseError, store.StoreError, sqlite3.Error, OSError) as exc:
         return _fail(name, exc)
+
+    print(_pulse_provenance(result, model))
+
     if args.dry_run:
-        print(text)
+        _print_dry_run(result, model)
         return 0
+
     try:
         out_path = pulse.write_pulse(result, out_dir=args.out_dir, model=model)
-    except OSError as exc:
+    except (pulse.PulseError, OSError) as exc:
         return _fail(name, exc)
     print(f"pulse written: {out_path}")
     return 0
