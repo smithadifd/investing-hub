@@ -18,6 +18,7 @@ SURFACE_COMMANDS = [
     "custodian import",
     "custodian list",
     "producers list",
+    "pulse write",
     "session-open",
 ]
 

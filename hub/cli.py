@@ -6,9 +6,10 @@ import os
 import sqlite3
 import sys
 from collections.abc import Callable, Sequence
+from datetime import date as _date
 from pathlib import Path
 
-from hub import custodian, ic, importer, preflight, producers, restore, session_open, store
+from hub import custodian, ic, importer, preflight, producers, pulse, restore, session_open, store
 from hub.producers.common import truncate
 
 
@@ -583,6 +584,118 @@ def cmd_custodian_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pulse_write_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument(
+        "--date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="pulse date (default: today UTC)",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=pulse.DEFAULT_OUT_DIR,
+        help="output directory (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help=f"model the drafter should use (default: {pulse.DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--ask-threshold",
+        type=float,
+        default=None,
+        metavar="F",
+        help=f"score above which an item crosses the high Herald ask bar"
+        f" (default: {pulse.DEFAULT_ASK_THRESHOLD})",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        metavar="F",
+        help=f"score below which an item is ignored (default: {pulse.DEFAULT_MIN_SCORE})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the Stage 0 evidence and the deterministic skeleton"
+        " instead of writing the file",
+    )
+
+
+def _pulse_provenance(result: pulse.PulseResult, model: str) -> str:
+    return (
+        f"pulse: model={model}"
+        f" date={result.date.isoformat()}"
+        f" high_bar={len(result.high_bar)}"
+        f" worth_discussing={len(result.worth_discussing)}"
+        f" quiet={'yes' if result.quiet else 'no'}"
+    )
+
+
+def _print_dry_run(result: pulse.PulseResult, model: str) -> None:
+    print("Stage 0 evidence:")
+    if result.high_bar:
+        print("  high-bar items:")
+        for item in result.high_bar:
+            print(f"    - {item.subject} ({item.detail}; score {item.score:.2f})")
+    if result.worth_discussing:
+        print("  worth-discussing items:")
+        for item in result.worth_discussing:
+            print(f"    - {item.subject} ({item.detail}; score {item.score:.2f})")
+    if not result.high_bar and not result.worth_discussing:
+        print("  (no qualifying items)")
+    print("Deterministic draft:")
+    print(pulse.compose_deterministic(result))
+
+
+def cmd_pulse_write(args: argparse.Namespace) -> int:
+    name = "pulse write"
+    if args.date is None:
+        on = pulse.today_utc()
+    else:
+        try:
+            on = _date.fromisoformat(args.date)
+        except ValueError:
+            return _fail(name, f"invalid --date {args.date!r} (expected YYYY-MM-DD)")
+    if args.db.is_dir():
+        return _fail(name, f"database path is a directory: {args.db}")
+    if not args.db.is_file():
+        return _fail(name, f"database not found: {args.db} (run `hub db init`)")
+    ask_threshold = (
+        args.ask_threshold if args.ask_threshold is not None else pulse.DEFAULT_ASK_THRESHOLD
+    )
+    min_score = args.min_score if args.min_score is not None else pulse.DEFAULT_MIN_SCORE
+    model = args.model if args.model is not None else pulse.DEFAULT_MODEL
+    try:
+        conn = store.connect(args.db)
+        try:
+            result = pulse.collect_pulse(
+                conn, on=on, ask_threshold=ask_threshold, min_score=min_score
+            )
+        finally:
+            conn.close()
+    except (pulse.PulseError, store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+
+    print(_pulse_provenance(result, model))
+
+    if args.dry_run:
+        _print_dry_run(result, model)
+        return 0
+
+    try:
+        out_path = pulse.write_pulse(result, out_dir=args.out_dir, model=model)
+    except (pulse.PulseError, OSError) as exc:
+        return _fail(name, exc)
+    print(f"pulse written: {out_path}")
+    return 0
+
+
 # group -> subcommand -> (help, handler). A group of None is a top-level command.
 COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], int]]]] = {
     "db": {
@@ -620,6 +733,9 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
             "list stage-0 candidates from mv-analyst, week-ahead and the triage queue",
             cmd_producers_list,
         ),
+    },
+    "pulse": {
+        "write": ("draft today's book section into out/book/<date>.md", cmd_pulse_write),
     },
     None: {
         "session-open": ("run the session-open checks", cmd_session_open),
@@ -664,6 +780,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "custodian import": _custodian_import_args,
     "custodian list": _db_path_arg,
     "producers list": _producers_list_args,
+    "pulse write": _pulse_write_args,
     "session-open": _session_open_args,
 }
 
