@@ -646,7 +646,10 @@ def test_migration_0003_adds_account_and_list_derives_it_for_older_rows(tmp_path
         ("testco", "transactions", "2026-01-31", "x/testco/2026-01-31/legacy/t.csv", TRANSACTIONS),
     )
     conn.commit()
-    assert store.migrate(conn) == ["0003_custodian_account.sql"]
+    assert store.migrate(conn) == [
+        "0003_custodian_account.sql",
+        "0004_producer_cursors.sql",
+    ]
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
     assert "account" in columns
     assert store.list_custodian_snapshots(conn)[0]["account"] is None

@@ -8,7 +8,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from hub import custodian, ic, importer, preflight, restore, session_open, store
+from hub import custodian, ic, importer, preflight, producers, restore, session_open, store
 
 
 def _db_path_arg(parser: argparse.ArgumentParser) -> None:
@@ -319,6 +319,43 @@ def _open_existing(name: str, db: Path) -> sqlite3.Connection | int:
     return store.connect(db)
 
 
+def _producers_list_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mv-analyst-root",
+        type=Path,
+        default=producers.DEFAULT_MV_ANALYST_ROOT,
+        help="mv-analyst checkout (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--week-ahead-root",
+        type=Path,
+        default=producers.DEFAULT_WEEK_AHEAD_ROOT,
+        help="week-ahead checkout (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--triage-queue-dir",
+        type=Path,
+        default=producers.DEFAULT_TRIAGE_QUEUE_DIR,
+        help="morning-brief investing-triage-queue directory (default: %(default)s)",
+    )
+
+
+def cmd_producers_list(args: argparse.Namespace) -> int:
+    """List every candidate every producer would emit against the given roots."""
+    reports = producers.status_reports(
+        mv_analyst_root=args.mv_analyst_root,
+        week_ahead_root=args.week_ahead_root,
+        triage_queue_dir=args.triage_queue_dir,
+    )
+    for report in reports:
+        print(f"{report.producer}: {report.status} — {report.count} candidate(s)")
+        for candidate in report.candidates:
+            print(f"  {candidate.kind} @ {candidate.as_of}")
+            print(f"    {candidate.summary}")
+            print(f"    {candidate.source_path}")
+    return 0
+
+
 def cmd_doc_list(args: argparse.Namespace) -> int:
     name = "doc list"
     try:
@@ -564,6 +601,12 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
         "import": ("import a custodian positions or transactions CSV", cmd_custodian_import),
         "list": ("list imported custodian snapshots", cmd_custodian_list),
     },
+    "producers": {
+        "list": (
+            "list stage-0 candidates from mv-analyst, week-ahead and the triage queue",
+            cmd_producers_list,
+        ),
+    },
     None: {
         "session-open": ("run the session-open checks", cmd_session_open),
     },
@@ -606,6 +649,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "doc revise": _doc_revise_args,
     "custodian import": _custodian_import_args,
     "custodian list": _db_path_arg,
+    "producers list": _producers_list_args,
     "session-open": _session_open_args,
 }
 
