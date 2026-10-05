@@ -58,6 +58,11 @@ class Candidate:
     ``source_path`` is the file the adapter read; ``as_of`` is the timestamp the
     producer stamped it with. ``producer`` distinguishes the three adapters in
     logs and downstream scoring.
+
+    ``identity`` is a short stable fingerprint of the source content the
+    candidate was built from — empty when the summary already changes with the
+    content. Stage 0 tells two reads apart by candidate equality, so a curated
+    source that moved must move the candidate, not just its timestamps.
     """
 
     producer: str
@@ -65,6 +70,7 @@ class Candidate:
     summary: str
     source_path: str
     as_of: str
+    identity: str = ""
 
 
 @dataclass(frozen=True)

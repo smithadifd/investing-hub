@@ -193,43 +193,60 @@ def test_mv_analyst_themes_board_yields_one_candidate_per_axis(copy_fixtures):
     assert sorted(c.summary for c in board) == [
         # An axis block with no rows is a real board state, still one candidate.
         "Gold as reserve asset (gold-reserve-asset): no readable position rows",
-        "The inflation path (inflation-path): 1 position(s) — Fixture Guest B",
-        "The long end (long-end-yields): 2 position(s) — Fixture Guest A, Fixture Guest C",
+        (
+            "The inflation path (inflation-path): 1 position(s) — "
+            "Fixture Guest B: Inflation is a sticky-services story, not a broad one"
+        ),
+        (
+            "The long end (long-end-yields): 2 position(s) — "
+            "Fixture Guest A: Long-end yields move on term premium, not inflation; "
+            "Fixture Guest C: The long end is priced for scarcity, not default"
+        ),
     ]
-    by_summary = {c.summary: c.as_of for c in board}
     # as_of is the newest date on the block's own rows, not the file's mtime.
-    assert (
-        by_summary[
-            "The long end (long-end-yields): 2 position(s) — Fixture Guest A, Fixture Guest C"
-        ]
-        == "2026-01-22T00:00:00Z"
-    )
-    assert (
-        by_summary["The inflation path (inflation-path): 1 position(s) — Fixture Guest B"]
-        == "2026-01-22T00:00:00Z"
-    )
+    long_end = next(c for c in board if "long-end" in c.summary)
+    inflation = next(c for c in board if "inflation-path" in c.summary)
+    assert long_end.as_of == "2026-01-22T00:00:00Z"
+    assert inflation.as_of == "2026-01-22T00:00:00Z"
     # No date on the gold block, so the board file's mtime is the provenance.
-    assert by_summary["Gold as reserve asset (gold-reserve-asset): no readable position rows"]
+    gold = next(c for c in board if "gold-reserve-asset" in c.summary)
+    assert gold.as_of
     for candidate in board:
         assert candidate.source_path.endswith("index/themes.md")
+        assert candidate.identity  # the block fingerprint rides in the identity
 
 
 def test_mv_analyst_changed_board_position_yields_a_changed_candidate(copy_fixtures):
-    """A cross-guest position change on the board moves a candidate, not silence."""
-    board_path = copy_fixtures["mv_analyst_root"] / "index" / "themes.md"
+    """A guest's stated position moving on the board moves a candidate, not silence."""
+    root = copy_fixtures["mv_analyst_root"]
+    board_path = root / "index" / "themes.md"
+
+    def long_end(report):
+        return next(
+            c for c in report.candidates if c.kind == "theme_axis" and "long-end" in c.summary
+        )
+
+    # Two reads of an unchanged board yield identical candidates.
+    first = producers.mv_analyst_candidates(root)
+    assert producers.mv_analyst_candidates(root).candidates == first.candidates
+    before = long_end(first)
+
+    # Same rows, same dates, same guests: only one guest's stated position moves.
     board_path.write_text(
         board_path.read_text(encoding="utf-8").replace(
             "Fixture Guest C | The long end is priced for scarcity, not default",
-            "Fixture Guest C | The long end is now a scarcity default, revised stance",
+            "Fixture Guest C | The long end now prices a scarcity bid, stance revised",
         )
     )
-    report = producers.mv_analyst_candidates(copy_fixtures["mv_analyst_root"])
-    long_end = next(
-        c for c in report.candidates if c.kind == "theme_axis" and "long-end" in c.summary
-    )
-    assert "Fixture Guest C" in long_end.summary
+    after = long_end(producers.mv_analyst_candidates(root))
+    assert after.as_of == before.as_of  # the rows' dates never moved
+    assert after.summary != before.summary
+    assert after.identity != before.identity
+    # The stated position itself is carried, not just a moved fingerprint.
+    assert "stance revised" in after.summary
     # The front-matter tags alone say nothing about who stands where; the
     # board is the source that moved.
+    report = producers.mv_analyst_candidates(root)
     assert any(c.kind == "episode_themes" for c in report.candidates)
 
 

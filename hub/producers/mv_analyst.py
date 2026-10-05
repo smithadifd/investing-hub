@@ -9,8 +9,11 @@ Three contracted sources besides the episode watch, each yielding candidates:
   Resolved sections are history, not candidates.
 * ``index/themes.md`` — the CURATED positions board (who stands where on each
   axis, and against whom; stage 3 maintains it, ``build_index.py`` never
-  touches it). One candidate per axis block, carrying who holds positions on
-  it, ``as_of`` the newest date on the board's own rows (the file's mtime when
+  touches it). One candidate per axis block, carrying each guest's stated
+  position in its summary plus a short content fingerprint of the whole
+  block in its ``identity`` — a curated change to the positions or the
+  commentary moves the candidate even when the rows and dates do not.
+  ``as_of`` is the newest date on the board's own rows (the file's mtime when
   the block carries none). The ``themes:`` front-matter below stays as
   supporting context; the board is the curated source. A missing board yields
   ``status = degraded`` with a note naming it — never an exception.
@@ -25,6 +28,7 @@ yields ``degraded`` — never an exception.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -214,9 +218,11 @@ def _read_themes_board(path: Path) -> list[Candidate]:
 
     Each block is one axis: its title, its slug from the shared theme
     vocabulary, and the position rows saying who stands where on it. The
-    candidate carries who holds positions so a cross-guest change on the board
-    moves the summary; ``as_of`` is the newest date on the block's own rows,
-    the file's mtime when the block carries none.
+    candidate carries each guest's stated position in its summary and a short
+    fingerprint of the whole block in ``identity``, so a curated change to a
+    position or the commentary moves the candidate even when the rows, the
+    guests and the dates all stay as they were. ``as_of`` is the newest date
+    on the block's own rows, the file's mtime when the block carries none.
     """
     fallback = file_mtime_iso(path)
     out: list[Candidate] = []
@@ -224,8 +230,12 @@ def _read_themes_board(path: Path) -> list[Candidate]:
         title, slug, body = match.group(1).strip(), match.group(2), match.group(3)
         rows = _board_rows(body)
         if rows:
-            guests = ", ".join(row["guest"] for row in rows if row["guest"])
-            summary = f"{title} ({slug}): {len(rows)} position(s) — {guests}"
+            stated = "; ".join(
+                f"{row['guest']}: {row['position']}"
+                for row in rows
+                if row["guest"] and row["position"]
+            )
+            summary = f"{title} ({slug}): {len(rows)} position(s) — {stated}"
         else:
             summary = f"{title} ({slug}): no readable position rows"
         dates = sorted({date for row in rows for date in _THEMES_DATE.findall(row["cells"])})
@@ -237,6 +247,7 @@ def _read_themes_board(path: Path) -> list[Candidate]:
                 summary=truncate(summary),
                 source_path=str(path.resolve()),
                 as_of=as_of or fallback,
+                identity=_block_identity(title, slug, body),
             )
         )
     return out
@@ -257,8 +268,20 @@ def _board_rows(body: str) -> list[dict[str, str]]:
         cells = [c.strip() for c in line.strip("|").split("|")]
         if len(cells) < 4 or cells[0].lower() == "guest":
             continue
-        rows.append({"guest": cells[0], "cells": " ".join(cells[1:])})
+        rows.append({"guest": cells[0], "position": cells[1], "cells": " ".join(cells[1:])})
     return rows
+
+
+def _block_identity(title: str, slug: str, body: str) -> str:
+    """A short sha256 of one axis block's normalized content — its stable identity.
+
+    The block is normalized to its non-empty lines, stripped, so a pure
+    whitespace edit does not move the fingerprint while any curated change to
+    the position rows or the commentary does. That is the point: a candidate
+    whose block moved must not be byte-identical to its earlier self.
+    """
+    lines = [line.strip() for line in (title, slug, *body.splitlines()) if line.strip()]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:12]
 
 
 def _read_analysis_themes(base: Path) -> list[Candidate]:
