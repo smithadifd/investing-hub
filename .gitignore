@@ -2,6 +2,7 @@
 import/
 data/
 backups/
+out/
 *.db
 *.db-wal
 *.db-shm
