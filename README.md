@@ -33,7 +33,7 @@ hub --help
 ### Custodian exports
 
 `hub custodian import` reads CSV exports only; PDF statements are not parsed. Keep the files
-under the git-ignored `import/` directory, one folder per custodian, date and account:
+under `import/` in your instance directory (the one you run `hub` from), one folder per custodian, date and account:
 
 ```text
 import/custodians/<custodian>/<YYYY-MM-DD>/<account-label>/positions.csv
@@ -62,8 +62,9 @@ pytest
 
 ## Local configuration
 
-Copy `CLAUDE.local.md.example` to `CLAUDE.local.md` and fill in your persona, credential
-references and IC base URL. That file is gitignored.
+In your instance directory (the one you run `hub` from, not the code checkout), copy
+`CLAUDE.local.md.example` to `CLAUDE.local.md` and fill in your persona, credential references
+and IC base URL. Keeping it there keeps personal data out of the code tree.
 
 ### Massive market-data MCP server
 

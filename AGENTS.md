@@ -148,5 +148,6 @@ database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fa
 
 `.mcp.json` is local-only (gitignored); copy it from `.mcp.json.example`.
 
-Per-machine values (IC base URL, credential references) live in the gitignored
-`CLAUDE.local.md` and `config.yaml`; see `CLAUDE.local.md.example` for the shape.
+Per-machine values (IC base URL, credential references) live in `CLAUDE.local.md` and
+`config.yaml` in the instance directory (the one you run `hub` from), not the code checkout, so
+personal data stays out of the code tree; see `CLAUDE.local.md.example` for the shape.
