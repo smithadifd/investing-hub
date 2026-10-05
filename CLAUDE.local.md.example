@@ -12,7 +12,7 @@
   `OP_CONNECT_HOST=http://<connect-host>:8090 ~/.claude/scripts/op-resolve.py --env-file .env.local -- hub ic pull`.
   The hub reads only `IC_API_TOKEN`; it never calls the credential manager itself.
 - Market data key (Massive): `op://Automation/Investing Companion - Secrets/MASSIVE_API_KEY`
-  Copy `.env.example` to `.env.local` (gitignored) and start Claude Code with `scripts/hub-session.sh`
+  Copy `.env.example` to `.env.local` (gitignored) and start Claude Code with `scripts/hub-session.sh` run from the instance directory (or with `HUB_INSTANCE_DIR` set)
   so the key reaches the `massive` MCP server as `MASSIVE_API_KEY` and the IC token reaches the
   SessionStart hook. The launcher picks one of three paths (README § Massive): `connect` (export
   `OP_CONNECT_HOST=http://<connect-host>:8090`), `op` (signed-in 1Password CLI), or `env` (export

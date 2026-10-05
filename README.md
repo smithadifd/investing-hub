@@ -92,12 +92,15 @@ Start Claude Code through the launcher. It needs `MASSIVE_API_KEY` (for the `mas
 | `env` | Everyone else | Export `MASSIVE_API_KEY` and `IC_API_TOKEN` yourself (by hand or from another secrets manager); no `.env.local` needed |
 
 ```bash
-scripts/hub-session.sh            # extra args pass through: scripts/hub-session.sh -p '...'
+# run from the instance directory (the one holding .env.local); extra args pass through
+/path/to/hub/scripts/hub-session.sh -p '...'
+HUB_INSTANCE_DIR=/path/to/instance /path/to/hub/scripts/hub-session.sh   # or name it explicitly
 ```
 
 The launcher picks the path itself, in this order: `env` when both variables are already set, then
 `connect` when `OP_CONNECT_HOST` is set, then `op` when the `op` CLI is installed. Set
-`HUB_SESSION_MODE=connect|op|env` to force one. It prints `hub-session: using <mode>` to stderr
+`HUB_SESSION_MODE=connect|op|env` to force one. The launcher works in the current directory (or
+`HUB_INSTANCE_DIR`), not the code checkout, and looks for `.env.local` there. It prints `hub-session: using <mode>` to stderr
 before it starts `claude`, and exits 2 with a one-line message if no path is available or (for
 `connect` and `op`) `.env.local` is missing. Secrets are never printed.
 

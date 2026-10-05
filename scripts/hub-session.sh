@@ -5,7 +5,8 @@
 #   env      both variables already non-empty in the environment -> claude directly
 #   connect  OP_CONNECT_HOST set -> ~/.claude/scripts/op-resolve.py resolves .env.local
 #   op       the 1Password CLI is installed -> op run resolves .env.local
-# Extra arguments pass through to claude, e.g. scripts/hub-session.sh -p '...'.
+# Run it from the instance directory (the one holding .env.local), or set HUB_INSTANCE_DIR to it.
+# Extra arguments pass through to claude, e.g. hub-session.sh -p '...'.
 set -euo pipefail
 
 mode="${HUB_SESSION_MODE:-}"
@@ -30,11 +31,15 @@ case "$mode" in
     ;;
 esac
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$root"
+# The instance directory (where .env.local lives) is the current directory unless
+# HUB_INSTANCE_DIR names another one.
+cd "${HUB_INSTANCE_DIR:-.}" 2>/dev/null || {
+  echo "hub-session: cannot enter HUB_INSTANCE_DIR=${HUB_INSTANCE_DIR:-.}" >&2
+  exit 2
+}
 
 if [ "$mode" != env ] && [ ! -f .env.local ]; then
-  echo "hub-session: .env.local is missing; copy .env.example to .env.local (see README § Massive)" >&2
+  echo "hub-session: .env.local is missing (looked in $(pwd)); copy .env.example to .env.local there, run from the instance directory, or set HUB_INSTANCE_DIR (see README § Massive)" >&2
   exit 2
 fi
 
