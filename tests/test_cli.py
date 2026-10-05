@@ -17,6 +17,7 @@ SURFACE_COMMANDS = [
     "doc revise",
     "custodian import",
     "custodian list",
+    "producers list",
     "pulse write",
     "session-open",
 ]

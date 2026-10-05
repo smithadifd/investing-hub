@@ -17,6 +17,7 @@ ROADMAP_TABLES = {
     "decisions",
     "calls",
     "beats_proposals",
+    "producer_cursors",
 }
 T0 = datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=UTC)
 

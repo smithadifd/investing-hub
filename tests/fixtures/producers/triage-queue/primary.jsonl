@@ -1,0 +1,3 @@
+{"queued": "2026-02-01T08:00:00+00:00", "account": "primary", "message_id": "msg-001", "sender": "Fixture Sender A", "subject": "Synthetic triage record A", "source_rule": "fixture-rule-a"}
+{"queued": "2026-02-02T09:30:00+00:00", "account": "primary", "message_id": "msg-002", "sender": "Fixture Sender B", "subject": "Synthetic triage record B", "source_rule": "fixture-rule-b"}
+{"queued": "2026-02-03T10:15:00+00:00", "account": "primary", "message_id": "msg-003", "sender": "Fixture Sender C", "subject": "Synthetic triage record C", "source_rule": null}

@@ -18,7 +18,8 @@ from pathlib import Path
 
 import yaml
 
-from hub import ic, store
+from hub import ic, producers, store
+from hub.producers.common import truncate
 
 DEFAULT_STALE_DAYS = 30
 CONFIG_SECTION = "session_open"
@@ -50,7 +51,7 @@ def _age(then: datetime, now: datetime) -> str:
 
 def _first_line(text: str) -> str:
     line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    return line if len(line) <= _TITLE_WIDTH else line[: _TITLE_WIDTH - 1] + "…"
+    return line if len(line) <= _TITLE_WIDTH else line[: _TITLE_WIDTH - 3] + "..."
 
 
 def resolve_stale_days(flag: int | None, config_path: Path = ic.CONFIG_FILE) -> tuple[int, str]:
@@ -185,6 +186,29 @@ def _stale_section(conn: sqlite3.Connection, now: datetime, stale_days: int) -> 
     return _titled(f"documents older than {stale_days}d", stale)
 
 
+def _producers_section(
+    *,
+    mv_analyst_root: Path | None,
+    week_ahead_root: Path | None,
+    triage_queue_dir: Path | None,
+) -> list[str]:
+    """One line per producer — name, status, candidate count or 'absent', latest as-of."""
+    lines: list[str] = []
+    for report in producers.status_reports(
+        mv_analyst_root=mv_analyst_root,
+        week_ahead_root=week_ahead_root,
+        triage_queue_dir=triage_queue_dir,
+    ):
+        as_of = max((c.as_of for c in report.candidates), default="")
+        as_of_text = f" latest {as_of}" if as_of else ""
+        count_text = f"{report.count} candidate" if report.count != 1 else "1 candidate"
+        notes = f" — {truncate('; '.join(report.notes))}" if report.notes else ""
+        lines.append(
+            f"producer {report.producer}: {report.status} — {count_text}{as_of_text}{notes}"
+        )
+    return lines
+
+
 def _guarded(name: str, section: Callable[[], list[str]]) -> list[str]:
     try:
         return section()
@@ -199,6 +223,9 @@ def build_block(
     now: datetime | None = None,
     pack_dir: Path = ic.PACK_DIR,
     config_path: Path = ic.CONFIG_FILE,
+    mv_analyst_root: Path | None = None,
+    week_ahead_root: Path | None = None,
+    triage_queue_dir: Path | None = None,
 ) -> str:
     now = now or datetime.now(UTC)
     lines = ["== hub session-open =="]
@@ -221,6 +248,15 @@ def build_block(
                 lines += _store_sections(conn, now, days)
         except (sqlite3.Error, OSError) as exc:
             lines.append(f"WARN store: cannot open {db}: {exc}")
+
+    lines += _guarded(
+        "producers",
+        lambda: _producers_section(
+            mv_analyst_root=mv_analyst_root,
+            week_ahead_root=week_ahead_root,
+            triage_queue_dir=triage_queue_dir,
+        ),
+    )
 
     # Last line of defence: nothing token-shaped or equal to the live token leaves this block.
     return ic.redact("\n".join(lines), os.environ.get(ic.TOKEN_ENV, "").strip() or None)

@@ -33,7 +33,7 @@ META_FILE = "pack-meta.json"
 CONTEXT_PACK_PATH = "/api/v1/export/context-pack"
 CONTRACT_DOCS_PATH = "/api/v1/export/contract-docs"
 TIMEOUT_SECONDS = 15.0
-REDACTED = "ict_…<redacted>"
+REDACTED = "ict_...<redacted>"
 # Belt and braces: anything shaped like an IC token is redacted even if it is not ours.
 # The alphabet matches what read_token accepts: printable ASCII without whitespace.
 _TOKEN_SHAPE = re.compile(r"ict_[!-~]+")
