@@ -644,3 +644,105 @@ def test_default_drafter_missing_binary_raises_pulse_error(monkeypatch):
     monkeypatch.setenv("HUB_PULSE_DRAFT_CMD", "/definitely/not/a/real/binary")
     with pytest.raises(pulse.PulseError, match="binary not found"):
         pulse.default_drafter("prompt text", "model-a")
+
+
+def test_pulse_write_with_only_resolving_call_and_high_min_score_is_quiet(
+    db, tmp_path, capsys, monkeypatch
+):
+    """A store with only a resolving call is quiet under a min-score above the call score.
+
+    With ``--min-score 0.9 --ask-threshold 0.95`` the fixed 0.85 score on calls
+    and beats falls below both thresholds, so they must not appear in
+    ``high_bar`` or ``worth_discussing`` and ``quiet`` must be derived from the
+    filtered result. Stdout counts, ``quiet`` and the file must all agree.
+    """
+    conn = store.connect(db)
+    try:
+        _seed_call(
+            conn,
+            subject="call-resolves-today",
+            call="call resolves today",
+            resolves_by=_today_iso(),
+        )
+    finally:
+        conn.close()
+
+    script_path = _stub_drafter_script(tmp_path, body="should not be called\n")
+    monkeypatch.setenv("HUB_PULSE_DRAFT_CMD", script_path)
+
+    out_dir = tmp_path / "out"
+    rc = main(
+        [
+            "pulse",
+            "write",
+            "--db",
+            str(db),
+            "--out-dir",
+            str(out_dir),
+            "--min-score",
+            "0.9",
+            "--ask-threshold",
+            "0.95",
+        ]
+    )
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    assert "quiet=yes" in captured.out
+    assert "high_bar=0" in captured.out
+    assert "worth_discussing=0" in captured.out
+    # Drafter must never be invoked on a quiet day.
+    assert not (tmp_path / "drafter.log").exists()
+
+    out_path = out_dir / (_today_iso() + ".md")
+    assert out_path.is_file()
+    body_text = out_path.read_text(encoding="utf-8")
+    assert body_text.strip().splitlines() == [
+        f"{_today_iso()}: Steady day; no book-level thesis invalidations or rung triggers active."
+    ]
+    # No leftover temp files in the out dir.
+    assert not list(out_dir.glob(".*.tmp"))
+
+
+def test_failed_rerun_leaves_prior_file_byte_identical(db, tmp_path, capsys, monkeypatch):
+    """A drafter-failing re-run leaves the prior successful file byte-identical.
+
+    The previous successful ``<date>.md`` is the authoritative artifact for the
+    date; a failed re-run must not partial-overwrite it, must not leave a
+    stray temp file, and must not create a second ``<date>.md``.
+    """
+    conn = store.connect(db)
+    try:
+        _seed_finding(conn, subject="thesis-x invalidation", score=0.95)
+    finally:
+        conn.close()
+
+    # First, write a successful pulse and snapshot its bytes.
+    monkeypatch.setenv(
+        "HUB_PULSE_DRAFT_CMD",
+        _stub_drafter_script(tmp_path, body="prior summary line\n"),
+    )
+    out_dir = tmp_path / "out"
+    rc = main(["pulse", "write", "--db", str(db), "--out-dir", str(out_dir)])
+    assert rc == 0
+    out_path = out_dir / (_today_iso() + ".md")
+    prior_bytes = out_path.read_bytes()
+    assert b"prior summary line" in prior_bytes
+
+    # Re-run with a failing drafter: must fail loudly and leave prior untouched.
+    monkeypatch.setenv(
+        "HUB_PULSE_DRAFT_CMD",
+        _stub_drafter_script(tmp_path, body="", exit_code=7),
+    )
+    rc2 = main(["pulse", "write", "--db", str(db), "--out-dir", str(out_dir)])
+    assert rc2 != 0
+    err = capsys.readouterr().err
+    assert "drafter" in err.lower()
+
+    # Prior file is byte-identical.
+    assert out_path.read_bytes() == prior_bytes
+    # No leftover temp files in the out dir.
+    assert not list(out_dir.glob(".*.tmp"))
+    # No additional *.md files written.
+    md_files = sorted(p.name for p in out_dir.glob("*.md"))
+    assert md_files == [out_path.name]

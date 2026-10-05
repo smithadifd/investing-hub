@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -139,6 +140,8 @@ def collect_pulse(
     for row in rows:
         if row["resolves_by"] != on_str or row["resolution"] is not None:
             continue
+        if HIGH_BAR_SCORE < min_score:
+            continue
         items.append(
             PulseItem(
                 kind=ITEM_KIND_CALL,
@@ -155,6 +158,8 @@ def collect_pulse(
     for row in rows:
         if row["status"] != "proposed" or _date_of(row["created_at"]) != on_str:
             continue
+        if HIGH_BAR_SCORE < min_score:
+            continue
         items.append(
             PulseItem(
                 kind=ITEM_KIND_BEAT,
@@ -169,7 +174,7 @@ def collect_pulse(
     worth_discussing = tuple(item for item in items if ask_threshold > item.score >= min_score)
     return PulseResult(
         date=on,
-        quiet=not items,
+        quiet=not (high_bar or worth_discussing),
         high_bar=high_bar,
         worth_discussing=worth_discussing,
     )
@@ -309,10 +314,23 @@ def write_pulse(
     """Stage 1 + write: ensure ``out_dir`` exists, persist the draft, return the path.
 
     If the drafter fails, times out or returns empty output, raises
-    ``PulseError`` and does NOT create the artifact file.
+    ``PulseError`` and does NOT create the artifact file — a previous
+    successful ``<date>.md`` for the same date is left in place untouched.
+    The final file is written via a temp file in the same directory plus
+    ``os.replace`` so a crash mid-write never leaves a partial file.
     """
     text = compose(result, model=model, drafter=drafter)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{result.date.isoformat()}.md"
-    out_path.write_text(text + "\n", encoding="utf-8")
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=out_dir, prefix=f".{out_path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+        os.replace(tmp_name, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
     return out_path
