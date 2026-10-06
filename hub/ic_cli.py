@@ -89,7 +89,7 @@ YES_LEVEL = (
 
 
 def _alert_add_args(p: argparse.ArgumentParser) -> None:
-    _common(p, yes_help=YES_ALERT)
+    _common(p, yes_help="required: every new alert sets a level (confirm with the operator first)")
     p.add_argument("--symbol", help="equity target")
     p.add_argument("--ratio-id", type=int, help="ratio target (id from `ratio add`)")
     p.add_argument("--entry-zone-item", metavar="SYMBOL", help="watchlist item, for entry_zone")
