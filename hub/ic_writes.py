@@ -192,7 +192,7 @@ def read_state(client: ic.IcClient, resource: str, ic_id: str | None) -> dict | 
     if resource == "alert":
         return next((a for a in client.alerts() if str(a.get("id")) == ic_id), None)
     if resource == "trigger":
-        return next((t for t in client.triggers() if str(t.get("id")) == ic_id), None)
+        return client.trigger(ic_id)
     if resource == "item":
         wid, _, iid = ic_id.partition(":")
         return next(
@@ -253,10 +253,13 @@ def list_writes(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
 
 
 def recent_writes(conn: sqlite3.Connection, now: datetime) -> list[sqlite3.Row]:
+    """Writes from the last day (not failed ones), plus any pending or unknown row of any age:
+    those mean "check IC" and must not age out of sight."""
     cutoff = iso_ms(now - timedelta(hours=RECENT_HOURS))
     return conn.execute(
         "SELECT id, at, action, target, status FROM ic_writes"
-        " WHERE at >= ? AND status != 'failed' ORDER BY id",
+        " WHERE (at >= ? AND status != 'failed') OR status IN ('pending', 'unknown')"
+        " ORDER BY id",
         (cutoff,),
     ).fetchall()
 
@@ -344,9 +347,10 @@ def _apply(
     try:
         reply = client.call(plan.method, plan.path, plan.body)
     except ic.IcError as exc:
-        # An HTTP status below 500 means IC refused the request: nothing was applied. A
-        # timeout, a dropped connection or a 5xx may still have been applied: status unknown.
-        refused = exc.status is not None and exc.status < 500
+        # Nothing was applied when IC refused the request (HTTP below 500) or the request
+        # never left (connection refused, DNS failure): status failed. A timeout, a reset
+        # after sending or a 5xx may still have been applied: status unknown.
+        refused = exc.not_sent or (exc.status is not None and exc.status < 500)
         status = "failed" if refused else "unknown"
         message = ic.redact(str(exc))
         conn.execute(
@@ -361,8 +365,9 @@ def _apply(
             return 1
         raise
     ic_id = _derive_ic_id(plan, reply)
-    after = _read_after(client, plan, ic_id, reply)
+    after = None if plan.method == "DELETE" else reply
     try:
+        # The send succeeded: record that at once, with IC's own reply as the after-state.
         conn.execute(
             "UPDATE ic_writes SET status = 'applied', after = ?, ic_id = ? WHERE id = ?",
             (_json(after), ic_id, write_id),
@@ -371,19 +376,36 @@ def _apply(
             conn.execute(
                 "UPDATE ic_writes SET reverted_by = ? WHERE id = ?", (write_id, plan.reverts)
             )
-    except sqlite3.Error as exc:
+        # Best effort: a fresh GET gives a fuller after-state.
+        fuller = _read_after(client, plan, ic_id, reply)
+        if fuller is not reply:
+            conn.execute("UPDATE ic_writes SET after = ? WHERE id = ?", (_json(fuller), write_id))
+    except BaseException as exc:  # KeyboardInterrupt included: tell the operator, re-raise
+        if isinstance(exc, sqlite3.Error):
+            detail = f"ic_writes #{write_id} could not be updated ({exc})"
+        else:
+            detail = f"{type(exc).__name__} interrupted the follow-up; see ic_writes #{write_id}"
         print(
-            f"hub ic {name}: WARN the write WAS applied in IC but ic_writes #{write_id} could not"
-            f" be updated ({exc}); it stays 'pending'. Record it by hand: {plan.method}"
-            f" {plan.path} {_json(plan.body)} -> {_json(after)}",
+            f"hub ic {name}: WARN the write WAS applied in IC but {detail}. Check the row and"
+            f" IC; record by hand if needed: {plan.method} {plan.path} {_json(plan.body)}"
+            f" -> {_json(reply)}",
             file=sys.stderr,
         )
-        return 1
+        if isinstance(exc, sqlite3.Error):
+            return 1
+        raise
     receipt_id, receipt_error = post_receipt(client, plan, ic_id, summary)
-    conn.execute(
-        "UPDATE ic_writes SET receipt_id = ?, receipt_error = ? WHERE id = ?",
-        (receipt_id, receipt_error, write_id),
-    )
+    try:
+        conn.execute(
+            "UPDATE ic_writes SET receipt_id = ?, receipt_error = ? WHERE id = ?",
+            (receipt_id, receipt_error, write_id),
+        )
+    except sqlite3.Error as exc:
+        print(
+            f"hub ic {name}: WARN applied, but the receipt result could not be recorded in"
+            f" ic_writes #{write_id} ({exc}); receipt {receipt_id or receipt_error}",
+            file=sys.stderr,
+        )
     line = f"hub ic {name}: applied {plan.action} {plan.target} (write #{write_id}"
     line += f", IC id {ic_id}" if ic_id else ""
     print(line + (f", receipt {receipt_id})" if receipt_id else ")"))
@@ -738,9 +760,18 @@ def _find_trigger(client: ic.IcClient, a: Any) -> tuple[str, str, dict]:
         return trigger_id, str(row.get("name", f"trigger {trigger_id}")), row
     if not a.name:
         raise WriteError("give a trigger NAME or --id")
-    rows = client.triggers()
-    live = [r for r in rows if r.get("status") in (None, "active")] or rows
-    row = ic.resolve_name(live, a.name, "trigger")
+    active = client.triggers()
+    try:
+        row = ic.resolve_name(active, a.name, "trigger")
+    except ic.ResolutionError as exc:
+        # No active match: look among retired ones too, so a retired trigger is named, not lost
+        everything = client.triggers(include_retired=True)
+        if len(everything) == len(active):
+            raise
+        try:
+            row = ic.resolve_name(everything, a.name, "trigger")
+        except ic.ResolutionError:
+            raise exc from None
     return str(row["id"]), str(row["name"]), row
 
 

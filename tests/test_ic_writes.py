@@ -54,6 +54,7 @@ class FakeIc:
         self.triggers: list[dict] = []
         self.receipts: list[dict] = []
         self.fail_receipts = False
+        self.query = ""
         self.next_id = 100
 
     @staticmethod
@@ -114,6 +115,7 @@ class FakeIc:
     def open(self, request, timeout=None):
         method = request.get_method()
         path = request.full_url.removeprefix("http://ic.invalid:8000")
+        path, _, self.query = path.partition("?")
         body = json.loads(request.data) if request.data else None
         assert request.get_header("Authorization") == f"Bearer {TOKEN}"
         self.calls.append((method, path, body))
@@ -174,7 +176,10 @@ class FakeIc:
                 return _Resp({"data": {"id": EVENT_ID, **body}})
             return _Resp(None, 204)
         if path == f"{api}/triggers" and method == "GET":
-            return _Resp({"data": self.triggers})
+            rows = self.triggers
+            if self.query != "include_retired=true":
+                rows = [t for t in rows if t["status"] == "active"]
+            return _Resp({"data": rows})
         if path == f"{api}/triggers" and method == "POST":
             row = self._trigger(self._new(), body["name"], body["rule"], body["action"])
             row.update({k: v for k, v in body.items() if k != "alert_ids"})
@@ -879,3 +884,120 @@ def test_token_never_appears_in_the_log(env, fake, capsys):
     _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30")
     dump = json.dumps([dict(r) for r in _rows(env)])
     assert TOKEN not in dump
+
+
+# --- post-send window, classification, retired triggers ----------------------------------------
+
+
+def test_keyerror_after_a_successful_send_leaves_an_applied_row_and_warns(
+    env, fake, capsys, monkeypatch
+):
+    def boom(*args, **kwargs):
+        raise KeyError("id")
+
+    monkeypatch.setattr(ic_writes, "_read_after", boom)
+    code, _, err = _hub(
+        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+    )
+    assert code == 1 and "WAS applied in IC" in err and "KeyError" in err
+    (row,) = _rows(env)
+    assert row["status"] == "applied" and json.loads(row["after"])["name"] == "CCC above 30"
+    assert row["ic_id"] == "101"
+
+
+def test_keyboard_interrupt_after_send_keeps_the_row_applied_and_propagates(
+    env, fake, capsys, monkeypatch
+):
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ic_writes, "_read_after", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        main(["ic", "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"])
+    assert "WAS applied in IC" in capsys.readouterr().err
+    (row,) = _rows(env)
+    assert row["status"] == "applied"
+
+
+def test_receipt_row_update_failure_is_a_warning(env, fake, capsys, monkeypatch):
+    conn = sqlite3.connect(env / "data" / "hub.db")
+    conn.execute(
+        "CREATE TRIGGER no_receipt BEFORE UPDATE OF receipt_id ON ic_writes"
+        " BEGIN SELECT RAISE(ABORT, 'locked'); END"
+    )
+    conn.commit()
+    conn.close()
+    code, out, err = _hub(
+        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+    )
+    assert code == 0 and "receipt result could not be recorded" in err
+    assert _rows(env)[0]["status"] == "applied"
+
+
+def _refuse(fake, monkeypatch, exc):
+    real = fake._route
+
+    def route(method, path, body):
+        if method == "POST" and path.endswith("/alerts"):
+            raise exc
+        return real(method, path, body)
+
+    monkeypatch.setattr(fake, "_route", route)
+
+
+@pytest.mark.parametrize(
+    ("exc", "status"),
+    [
+        (urllib.error.URLError(ConnectionRefusedError()), "failed"),
+        (urllib.error.URLError(__import__("socket").gaierror("no such host")), "failed"),
+        (ConnectionRefusedError(), "failed"),
+        (urllib.error.URLError(TimeoutError()), "unknown"),
+        (TimeoutError(), "unknown"),
+        (urllib.error.URLError(ConnectionResetError()), "unknown"),
+    ],
+)
+def test_send_failure_classification(env, fake, capsys, monkeypatch, exc, status):
+    _refuse(fake, monkeypatch, exc)
+    code, _, err = _hub(
+        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+    )
+    assert code == 1
+    assert _rows(env)[0]["status"] == status
+    assert ("check IC before retrying" in err) == (status == "unknown")
+
+
+def test_old_pending_and_unknown_rows_stay_visible_in_session_open(env, fake, capsys):
+    conn = sqlite3.connect(env / "data" / "hub.db")
+    for status, at in (
+        ("pending", "2026-09-01T10:00:00.000Z"),
+        ("unknown", "2026-09-02T10:00:00.000Z"),
+        ("failed", "2026-09-03T10:00:00.000Z"),
+        ("applied", "2026-09-04T10:00:00.000Z"),
+    ):
+        conn.execute(
+            "INSERT INTO ic_writes (at, action, target, method, path, status)"
+            " VALUES (?, 'ADD_ALERT', ?, 'POST', '/x', ?)",
+            (at, f"T-{status}", status),
+        )
+    conn.commit()
+    conn.close()
+    assert main(["session-open"]) == 0
+    out = capsys.readouterr().out
+    assert "recent IC writes (last 24h): 2" in out
+    assert "T-pending" in out and "[pending," in out and "check IC" in out
+    assert "T-unknown" in out and "T-failed" not in out and "T-applied" not in out
+
+
+def test_trigger_by_name_falls_back_to_retired_and_id_reads_retired(env, fake, capsys):
+    fake.triggers = [
+        fake._trigger(41, "Live ladder", "r", "a"),
+        fake._trigger(42, "Old ladder", "r0", "a0", status="retired"),
+    ]
+    code, out, _ = _hub(capsys, "trigger", "update", "Old", "--tier", "red", "--dry-run")
+    assert code == 0 and "trigger update" not in out and "PUT /api/v1/triggers/42" in out
+    assert ("GET", "/api/v1/triggers", None) in fake.calls
+    code, out, _ = _hub(capsys, "trigger", "update", "--id", "42", "--tier", "red", "--dry-run")
+    assert code == 0 and "PUT /api/v1/triggers/42" in out
+    assert ("GET", "/api/v1/triggers/42", None) in fake.calls
+    code, _, err = _hub(capsys, "trigger", "update", "Nothing", "--tier", "x", "--dry-run")
+    assert code == 1 and "no trigger matches" in err

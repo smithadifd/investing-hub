@@ -159,4 +159,4 @@ def test_failed_writes_are_not_counted_as_recent(env, capsys):
     conn.commit()
     conn.close()
     out = _block(capsys)
-    assert "recent IC writes (last 24h): 1" in out and "[unknown]" in out and "ZZZ" not in out
+    assert "recent IC writes (last 24h): 1" in out and "[unknown, " in out and "ZZZ" not in out

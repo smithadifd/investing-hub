@@ -201,13 +201,20 @@ def _briefs_section(conn: sqlite3.Connection) -> list[str]:
     )
 
 
+def _status_note(row: sqlite3.Row, now: datetime) -> str:
+    if row["status"] == "applied":
+        return ""
+    then = _parse_time(row["at"])
+    age = f", {_age(then, now)} ago" if then else ""
+    return f" [{row['status']}{age}: check IC]" if row["status"] != "failed" else ""
+
+
 def _ic_writes_section(conn: sqlite3.Connection, now: datetime) -> list[str]:
     rows = ic_writes.recent_writes(conn, now)
     return _titled(
         f"recent IC writes (last {ic_writes.RECENT_HOURS}h)",
         [
-            f"#{r['id']} ({r['at']}) {r['action']} {r['target']}"
-            + ("" if r["status"] == "applied" else f" [{r['status']}]")
+            f"#{r['id']} ({r['at']}) {r['action']} {r['target']}" + _status_note(r, now)
             for r in rows
         ],
     )

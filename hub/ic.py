@@ -13,6 +13,7 @@ import functools
 import json
 import os
 import re
+import socket
 import tempfile
 import urllib.error
 import urllib.request
@@ -52,6 +53,8 @@ class IcError(Exception):
     """
 
     status: int | None = None
+    # True when the request provably never reached IC (connection refused, DNS failure)
+    not_sent: bool = False
 
 
 def _clean_errors[**P, R](func: Callable[P, R]) -> Callable[P, R]:
@@ -209,13 +212,19 @@ def _request(
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise IcError(_timeout_line(base_url, timeout)) from None
+        never_sent = isinstance(exc.reason, ConnectionRefusedError | socket.gaierror)
         if isinstance(exc.reason, ConnectionRefusedError):
-            raise IcError(f"cannot reach IC at {base_url}: connection refused") from None
-        raise IcError(f"cannot reach IC at {base_url}: {exc.reason}") from None
+            error = IcError(f"cannot reach IC at {base_url}: connection refused")
+        else:
+            error = IcError(f"cannot reach IC at {base_url}: {exc.reason}")
+        error.not_sent = never_sent
+        raise error from None
     except TimeoutError:
         raise IcError(_timeout_line(base_url, timeout)) from None
     except ConnectionRefusedError:
-        raise IcError(f"cannot reach IC at {base_url}: connection refused") from None
+        error = IcError(f"cannot reach IC at {base_url}: connection refused")
+        error.not_sent = True
+        raise error from None
     if for_write and not body.strip():
         return None
     try:
@@ -350,15 +359,16 @@ def request_json(
     """Send ``method path`` (optional JSON body) and return the decoded JSON, or None for an
     empty reply. Errors leave as one redacted line carrying IC's validation detail."""
     timeout = TIMEOUT_SECONDS if timeout is None else timeout
-    status = None
+    status, not_sent = None, False
     try:
         return _request(base_url, method.upper(), path, token, timeout, payload, for_write=True)
     except IcError as exc:
-        message, status = redact(str(exc), token), exc.status
+        message, status, not_sent = redact(str(exc), token), exc.status, exc.not_sent
     except Exception as exc:
         message = redact(f"IC request failed: {type(exc).__name__}: {exc}", token)
     error = IcError(message)
     error.status = status
+    error.not_sent = not_sent
     raise error from None
 
 
@@ -408,8 +418,21 @@ class IcClient:
             raise IcError("IC returned an unexpected watchlist payload")
         return data
 
-    def triggers(self) -> list[dict]:
-        return _as_list(self.call("GET", f"{API}/triggers"), "triggers")
+    def triggers(self, include_retired: bool = False) -> list[dict]:
+        query = "?include_retired=true" if include_retired else ""
+        return _as_list(self.call("GET", f"{API}/triggers{query}"), "triggers")
+
+    def trigger(self, trigger_id: int | str) -> dict | None:
+        """One trigger by id (``GET /triggers/{id}``, retired ones included); None if absent."""
+        try:
+            data = self.call("GET", f"{API}/triggers/{trigger_id}")
+        except IcError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if not isinstance(data, dict):
+            raise IcError("IC returned an unexpected trigger payload")
+        return data
 
     def accounts(self) -> list[dict]:
         return _as_list(self.call("GET", f"{API}/accounts"), "accounts")
