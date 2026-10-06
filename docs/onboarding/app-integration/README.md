@@ -10,7 +10,7 @@ advisor.
 It closes the loop between three roles:
 
 ```
-advisor ──(handoff block)──▶ executor (Claude Code) ──(API calls)──▶ Investing Companion app
+advisor ──(`hub ic` verbs, direct API writes)──────────────▶ Investing Companion app
    ▲                                                                          │
    │                                                                          ▼
    └──────── context pack (prices, alerts, triggers, receipts) ◀──── GET /export/context-pack
@@ -19,9 +19,12 @@ advisor ──(handoff block)──▶ executor (Claude Code) ──(API calls)�
 - The **app** exports a *context pack*: live prices, alerts, entry zones, triggers, upcoming
   events, and execution receipts.
 - The **advisor** (your hub session) reads the pack each session and, when it wants to
-  change something, emits a *handoff block* — a plain-language action list.
-- The **executor** (Claude Code, in your app repo) runs those actions against the app's API and
-  posts a receipt, which shows up in the next pack. The loop closes itself.
+  change something, runs a `hub ic` verb (`hub ic alert add`, `hub ic watchlist update-item`,
+  `hub ic trade log` and so on). The hub applies it to the app's API with an `advisor:write`
+  token, logs it, and posts a receipt, which shows up in the next pack. The loop closes itself.
+  There is no handoff block and no separate executor. `trade log` and any alert deactivation or
+  removal need `--yes`, passed only after the operator confirms in chat; `hub ic revert` undoes a
+  logged write.
 
 ## The doc here
 

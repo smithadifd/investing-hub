@@ -139,7 +139,7 @@ Most frameworks here are reusable defaults — confirm and keep. Personalize:
 
 **Skip entirely if not running the app.** If running it:
 - The read/write contract is **not** re-entered here. `GET /api/v1/export/contract-docs` on your Investing Companion instance serves the current read-side (handoff schema) and write-side (advisor actions) contract docs.
-- In `INVESTING_COMPANION.md`, fill the inventory (watchlists, triggers, executor setup,
+- In `INVESTING_COMPANION.md`, fill the inventory (watchlists, triggers, write-access setup,
   notifications, retrieval transport) and the source-of-truth notes. (No `{{SCHEMA_VERSION}}` to
   set — the contract docs served by that endpoint are the single source of the version.)
 - Upload the two contract docs from that endpoint to the advisor verbatim.

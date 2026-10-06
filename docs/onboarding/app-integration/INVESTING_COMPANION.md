@@ -45,7 +45,7 @@ from an out-of-date copy of the contract.*
    changes get misread as anomalies.
 4. **Know what the pack can't answer.** It lists alerts and triggers but not necessarily their
    *linkages*; the trade log may be a partial seed, not the full book. For anything the pack
-   doesn't expose, get a direct read from the executor (Claude Code) — don't infer it.
+   doesn't expose, read it from the app directly or ask the operator — don't infer it.
 5. **Don't issue destructive actions off an unverified read.** If state is uncertain, verify
    against the authoritative source first. Treat another component's confident prose (the
    executor's, a morning digest's) as **unverified until checked** — and don't accuse it of
@@ -72,7 +72,7 @@ Adjust the right-hand notes to your setup.*
 | What do we actually hold? | **`HOLDINGS.md`** | Human-maintained, custodian-confirmed — the portfolio record `{{UNTIL_TRADE_LOG_BACKFILLED}}` |
 | Live prices, alerts, zones, triggers, events, receipts | **Context pack** | ≤ pull each session, *after* the freshness/completeness checks |
 | Which positions are *logged in the app* | Pack `positions` | `{{PARTIAL_SEED_OR_FULL}}` — see guardrail |
-| Alert↔trigger linkages | **Executor (Claude Code), direct API read** | The pack may list alerts and triggers separately; don't infer linkage from it |
+| Alert↔trigger linkages | **A direct read from the app (the cached pack's `triggers` rows, or the app UI)** | The pack may list alerts and triggers separately; don't infer linkage from it |
 | Thesis reasoning, invalidation, entry rationale | **`ACTIVE_THESES.md` / `WATCHLIST.md`** | Their embedded price snapshots are stale-by-design — ignore them for live levels |
 | What the app can / can't do | Pack `unsupported_features` | Not this doc, not the contract docs |
 
@@ -89,9 +89,11 @@ until the trade log is fully backfilled.
    Don't infer live state from the markdown docs.
 2. **Read the receipts**, then **reconcile** against `HOLDINGS.md` (pack = live overlay for
    logged names; `HOLDINGS` = full book).
-3. **Advise off the pack;** emit handoff blocks for changes using the `advisor-actions.md`
-   vocabulary. For anything touching alert↔trigger links, confirm the link map with the
-   executor first.
+3. **Advise off the pack;** make changes yourself with `hub ic ...` verbs, which mirror the
+   `advisor-actions.md` vocabulary (run `hub ic --help`). Use `--dry-run` to see the request,
+   and pass `--yes` for `trade log` and for deactivating or removing an alert only after the
+   operator confirms in chat. For anything touching alert↔trigger links, confirm the link map
+   against the app first.
 4. **Receipts close the loop** — they surface in the next pack's `recent_handoffs`; no need to
    ask what happened.
 
@@ -116,8 +118,8 @@ capability notes, mark them **advisory only** and date them:
 
 - **Watchlists in use:** `{{WATCHLISTS}}`
 - **Trigger playbook:** `{{TRIGGERS}}` *(your standing "if X then Y" orders)*
-- **Executor:** `{{EXECUTOR_SETUP}}` *(e.g., "Claude Code against the app API at its base URL
-  (e.g. `https://invest.example.com/api/v1`); handoff blocks are suggestions the user reviews, not commands")*
+- **Write access:** `{{WRITE_SETUP}}` *(e.g., "`IC_API_TOKEN` minted with the `pack:read` and
+  `advisor:write` scopes, base URL `https://invest.example.com`; the session runs `hub ic` verbs")*
 - **Notifications:** `{{NOTIFICATIONS}}` *(e.g., "Discord morning pulse + EOD wrap")*
 
 ---

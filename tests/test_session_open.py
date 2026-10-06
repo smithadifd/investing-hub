@@ -167,16 +167,13 @@ def test_store_without_tables_warns_per_section(env, capsys):
     (env / "data" / "hub.db").unlink()
     sqlite3.connect(env / "data" / "hub.db").close()
     out = _run(capsys)
-    for name in ("briefs", "handoffs", "documents"):
+    for name in ("briefs", "ic_writes", "documents"):
         assert f"WARN {name}: store query failed" in out
 
 
-def test_pending_briefs_unapplied_handoffs_and_stale_documents_listed(env, capsys):
+def test_pending_briefs_and_stale_documents_listed(env, capsys):
     _sql(env, "INSERT INTO briefs (body, status) VALUES (?, 'pending')", ("Pending brief A\nx",))
     _sql(env, "INSERT INTO briefs (body, status) VALUES (?, 'consumed')", ("Done brief B",))
-    _sql(env, "INSERT INTO handoffs (body, status) VALUES (?, 'draft')", ("Draft handoff C",))
-    _sql(env, "INSERT INTO handoffs (body, status) VALUES (?, 'approved')", ("Approved hand D",))
-    _sql(env, "INSERT INTO handoffs (body, status) VALUES (?, 'applied')", ("Applied hand E",))
     conn = store.connect(env / "data" / "hub.db")
     for slug in ("old-doc", "fresh-doc"):
         store.insert_document_revision(
@@ -191,8 +188,7 @@ def test_pending_briefs_unapplied_handoffs_and_stale_documents_listed(env, capsy
 
     out = _run(capsys)
     assert "pending briefs: 1" in out and "Pending brief A" in out and "Done brief B" not in out
-    assert "unapplied handoffs: 2" in out
-    assert "Draft handoff C" in out and "Approved hand D" in out and "Applied hand E" not in out
+    assert "handoffs" not in out
     assert "documents older than 30d: 1" in out
     assert "old-doc" in out and "fresh-doc" not in out
 

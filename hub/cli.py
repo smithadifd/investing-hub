@@ -9,7 +9,18 @@ from collections.abc import Callable, Sequence
 from datetime import date as _date
 from pathlib import Path
 
-from hub import custodian, ic, importer, preflight, producers, pulse, restore, session_open, store
+from hub import (
+    custodian,
+    ic,
+    ic_cli,
+    importer,
+    preflight,
+    producers,
+    pulse,
+    restore,
+    session_open,
+    store,
+)
 from hub.producers.common import truncate
 
 
@@ -718,6 +729,7 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
             cmd_ic_preflight,
         ),
         "show": ("show counts from the cached context pack", cmd_ic_show),
+        **ic_cli.COMMANDS,
     },
     "doc": {
         "list": ("list documents with their latest revision", cmd_doc_list),
@@ -782,6 +794,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "producers list": _producers_list_args,
     "pulse write": _pulse_write_args,
     "session-open": _session_open_args,
+    **ic_cli.ARGUMENTS,
 }
 
 
@@ -790,7 +803,7 @@ def _command_listing() -> str:
     for group, subs in COMMANDS.items():
         for name, (help_text, _) in subs.items():
             full = name if group is None else f"{group} {name}"
-            lines.append(f"  hub {full:<22} {help_text}")
+            lines.append(f"  hub {full:<26} {help_text}")
     return "\n".join(lines)
 
 
@@ -813,8 +826,17 @@ def build_parser() -> argparse.ArgumentParser:
         group_parser = top.add_parser(group, help=f"{group} commands")
         group_subs = group_parser.add_subparsers(dest="subcommand", metavar="<subcommand>")
         group_subs.required = True
+        nested: dict[str, argparse._SubParsersAction] = {}
         for name, (help_text, handler) in subs.items():
-            sub = group_subs.add_parser(name, help=help_text)
+            first, _, verb = name.partition(" ")
+            if verb:  # "alert add" -> `hub ic alert add`
+                if first not in nested:
+                    middle = group_subs.add_parser(first, help=f"{group} {first} commands")
+                    nested[first] = middle.add_subparsers(dest="verb", metavar="<verb>")
+                    nested[first].required = True
+                sub = nested[first].add_parser(verb, help=help_text)
+            else:
+                sub = group_subs.add_parser(name, help=help_text)
             sub.set_defaults(handler=handler)
             if f"{group} {name}" in ARGUMENTS:
                 ARGUMENTS[f"{group} {name}"](sub)

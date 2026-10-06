@@ -5,7 +5,7 @@
 - <what to always include or never do in advice>
 
 ## Credential references (names only, never values)
-- IC read-only token: `op://Automation/Investing Companion - Secrets/IC_API_TOKEN`
+- IC API token (scopes `pack:read` and `advisor:write`): `op://Automation/Investing Companion - Secrets/IC_API_TOKEN`
   Resolve it into the environment only for the command that needs it: put
   `IC_API_TOKEN="op://Automation/Investing Companion - Secrets/IC_API_TOKEN"` in a gitignored
   env-file such as `.env.local`, then run
