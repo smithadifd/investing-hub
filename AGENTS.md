@@ -158,8 +158,8 @@ chat first, then pass `--yes`.
 - `trade log`;
 - any write that deactivates or removes an alert (`alert modify --inactive`, `alert remove`, or a
   revert that does either);
-- any write that sets, changes or clears a level: an alert threshold (`alert add|modify
-  --threshold`), a watchlist item's `--target-price` or `--entry-zone` (or `--clear` of either),
+- any write that sets, changes or clears a level: every `alert add`, an alert's threshold or
+  condition (`alert modify --threshold|--condition`), a watchlist item's `--target-price` or `--entry-zone` (or `--clear` of either),
   or a revert that restores one. Levels and sizes are always proposed, never applied silently.
 
 Everything else (notes, theses, names, cooldowns, events, triggers, lessons) applies directly.

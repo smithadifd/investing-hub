@@ -1157,3 +1157,25 @@ def test_level_changes_require_yes(env, fake, capsys):
 def test_non_level_edits_apply_without_yes(env, fake, capsys):
     assert _hub(capsys, "alert", "modify", "BBB", "--notes", "n", "--cooldown", "30")[0] == 0
     assert _hub(capsys, "watchlist", "update-item", "BBB", "--append-thesis", "more")[0] == 0
+
+
+def test_condition_changes_and_zone_alerts_require_yes(env, fake, capsys):
+    gated = [
+        ("alert", "modify", "BBB", "--condition", "above"),
+        ("alert", "add", "--entry-zone-item", "BBB", "--condition", "entry_zone"),
+    ]
+    for step in gated:
+        code, _, err = _hub(capsys, *step)
+        assert code == 1 and "condition_type" in err, step
+    assert fake.writes() == []
+
+
+def test_deactivate_plus_level_names_both_reasons(env, fake, capsys):
+    code, _, err = _hub(capsys, "alert", "modify", "BBB", "--inactive", "--threshold", "6")
+    assert code == 1 and "deactivates an alert and sets or changes a level" in err
+
+
+def test_revert_recreate_of_removed_alert_requires_yes(env, fake, capsys):
+    _hub(capsys, "alert", "remove", "BBB", "--yes")
+    code, _, err = _hub(capsys, "revert", "1")
+    assert code == 1 and "sets or changes a level" in err

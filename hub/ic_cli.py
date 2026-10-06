@@ -79,8 +79,8 @@ def _alert_fields(p: argparse.ArgumentParser, *, condition_required: bool = Fals
 
 
 YES_ALERT = (
-    "required when this sets or changes a threshold, or deactivates (--inactive) or removes an"
-    " alert (confirm with the operator in chat first)"
+    "required when this sets or changes a threshold or condition, or deactivates (--inactive)"
+    " the alert (confirm with the operator in chat first)"
 )
 YES_LEVEL = (
     "required when this sets, changes or clears a target price or entry zones (confirm with the"
