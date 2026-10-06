@@ -81,7 +81,7 @@ onboarding/
 │   ├── WATCHLIST.md              ← entry frameworks, swing log, pre-trade checklist
 │   ├── ACTIVE_THESES.md          ← conviction plays w/ evidence + invalidation criteria
 │   └── INVESTMENT_PRINCIPLES.md  ← philosophy, position sizing, rules, learning log
-└── app-integration/              ← Layer 3 (OPTIONAL): self-hosted app handoff loop
+└── app-integration/              ← Layer 3 (OPTIONAL): self-hosted app, direct write loop
     ├── README.md                 ← what this layer is and when to use it
     └── INVESTING_COMPANION.md    ← session-open discipline + source-of-truth map
 ```

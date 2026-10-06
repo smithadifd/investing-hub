@@ -11,14 +11,15 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
-from hub import ic, producers, store
+from hub import ic, ic_writes, producers, store
 from hub.producers.common import truncate
 
 DEFAULT_STALE_DAYS = 30
@@ -39,6 +40,42 @@ def _parse_time(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+LOCALTIME = Path("/etc/localtime")
+
+
+def _local_zone(environ: Mapping[str, str], localtime: Path) -> tuple[tzinfo | None, str | None]:
+    """The operator's zone and its IANA name, from ``TZ`` or, with ``TZ`` unset, /etc/localtime.
+
+    ``(None, None)`` means "use the system local zone, and do not name it": the name is only
+    given when it is confirmed by loading it through ``ZoneInfo``.
+    """
+    tz = environ.get("TZ", "").strip().lstrip(":")
+    if environ.get("TZ", "").strip():
+        try:
+            return ZoneInfo(tz), tz
+        except Exception:  # unknown or malformed TZ: fall back to the system zone, unnamed
+            return None, None
+    try:
+        resolved = str(localtime.resolve())
+        marker = "zoneinfo/"
+        name = resolved[resolved.index(marker) + len(marker) :]
+        return ZoneInfo(name), name
+    except Exception:  # no symlink into a zoneinfo tree, or not a loadable zone
+        return None, None
+
+
+def local_now_line(
+    now: datetime,
+    environ: Mapping[str, str] | None = None,
+    localtime: Path = LOCALTIME,
+) -> str:
+    """``now: Tue 2026-10-06 20:04 EDT (America/New_York)``: local weekday, date and time."""
+    zone, name = _local_zone(os.environ if environ is None else environ, localtime)
+    local = now.astimezone(zone) if zone is not None else now.astimezone()
+    stamp = local.strftime("%a %Y-%m-%d %H:%M ") + (local.tzname() or local.strftime("%z"))
+    return f"now: {stamp}" + (f" ({name})" if name else "")
 
 
 def _age(then: datetime, now: datetime) -> str:
@@ -164,14 +201,36 @@ def _briefs_section(conn: sqlite3.Connection) -> list[str]:
     )
 
 
-def _handoffs_section(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute(
-        "SELECT id, body, status, created_at FROM handoffs WHERE status != 'applied' ORDER BY id"
-    ).fetchall()
+def _status_note(row: sqlite3.Row, now: datetime) -> str:
+    if row["status"] == "applied":
+        return ""
+    then = _parse_time(row["at"])
+    age = f", {_age(then, now)} ago" if then else ""
+    return f" [{row['status']}{age}: check IC]" if row["status"] != "failed" else ""
+
+
+def _ic_writes_section(conn: sqlite3.Connection, now: datetime) -> list[str]:
+    rows = ic_writes.recent_writes(conn, now)
     return _titled(
-        "unapplied handoffs",
-        [f"#{r['id']} [{r['status']}] ({r['created_at']}) {_first_line(r['body'])}" for r in rows],
+        f"recent IC writes (last {ic_writes.RECENT_HOURS}h)",
+        [
+            f"#{r['id']} ({r['at']}) {r['action']} {r['target']}" + _status_note(r, now)
+            for r in rows
+        ],
     )
+
+
+def _legacy_handoffs_section(conn: sqlite3.Connection) -> list[str]:
+    """Rows left in the retired ``handoffs`` table must not vanish silently."""
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM handoffs WHERE status IN ('draft', 'approved')"
+        ).fetchone()[0]
+    except sqlite3.Error:
+        return []
+    if not n:
+        return []
+    return [f"WARN {n} legacy handoffs unapplied (handoffs retired; apply or ignore)"]
 
 
 def _stale_section(conn: sqlite3.Connection, now: datetime, stale_days: int) -> list[str]:
@@ -226,9 +285,12 @@ def build_block(
     mv_analyst_root: Path | None = None,
     week_ahead_root: Path | None = None,
     triage_queue_dir: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    localtime: Path = LOCALTIME,
 ) -> str:
     now = now or datetime.now(UTC)
     lines = ["== hub session-open =="]
+    lines += _guarded("now", lambda: [local_now_line(now, environ, localtime)])
     days, config_warning = resolve_stale_days(stale_days, config_path)
     if config_warning:
         lines.append(f"WARN config: {config_warning}")
@@ -266,7 +328,8 @@ def _store_sections(conn: sqlite3.Connection, now: datetime, days: int) -> list[
     lines: list[str] = []
     for name, section in (
         ("briefs", lambda: _briefs_section(conn)),
-        ("handoffs", lambda: _handoffs_section(conn)),
+        ("ic_writes", lambda: _ic_writes_section(conn, now)),
+        ("handoffs", lambda: _legacy_handoffs_section(conn)),
         ("documents", lambda: _stale_section(conn, now, days)),
     ):
         try:

@@ -11,8 +11,12 @@ The advisor and attention layer that pairs with Investing Companion (IC). IC own
 state; the hub owns the operator's theses, principles and profile and decides when something is
 worth the operator's attention. Public template, private instance: the repo is machinery only.
 
-Non-goals: the hub never executes trades, never writes to IC except through approval-gated
-handoff blocks, and never commits personal data.
+The room session changes IC itself, directly: `hub ic ...` verbs apply each advisor action with
+an `advisor:write` token, log it in `ic_writes` and post an IC receipt. There is no handoff step
+(decided 2026-10-06).
+
+Non-goals: the hub never executes trades, never writes to IC except through the logged `hub ic`
+verbs, and never commits personal data.
 
 ## Tech stack
 
@@ -47,6 +51,14 @@ hub custodian list         # snapshots: custodian, account, kind, as_of, importe
 hub producers list [--db PATH] [--mv-analyst-root R] [--week-ahead-root R] [--triage-queue-dir D]  # stage-0 candidates; stateful: advances the triage cursor and writes beat proposals
 hub ic show [--counts]     # counts-only view of the cached context pack
 hub session-open           # print the session status block; always exits 0, read-only
+hub ic alert add|modify|remove ...            # IC alerts (modify --inactive and remove need --yes)
+hub ic watchlist add-item|update-item|create ...  # watchlists and items
+hub ic event add|update|remove ...            # calendar events
+hub ic trade log SYMBOL --type T --quantity N --price P --yes  # log a trade (needs --yes)
+hub ic trigger add|update|retire ...          # trigger-playbook standing orders
+hub ic lesson add ... / hub ic ratio add ...  # lessons and ratios
+hub ic writes [--limit N]  # the ic_writes log, newest first
+hub ic revert ID [--yes]   # undo one logged write (refuses if IC changed since)
 ```
 
 `hub db init|migrate|backup` take `--db PATH` (default `data/hub.db`) and `backup` takes
@@ -74,9 +86,10 @@ Drop layout: README "Custodian exports".
 and prints `<slug> revision N (session)`; creating a new slug needs `--kind` (and `--kind`/`--title` on an existing slug are refused), and an empty body
 is refused. Unknown slugs or revisions and other failures exit 1 with one line on stderr.
 
-`hub session-open` (`--db PATH`, `--stale-days N`) prints one status block: pack age and
-versions, contract drift against IC's contract docs (or `contract: in sync`), pending briefs,
-unapplied handoffs, documents not revised for `--stale-days` (default `session_open.stale_days`
+`hub session-open` (`--db PATH`, `--stale-days N`) prints one status block: a `now:` line (local
+weekday, date, time and zone), pack age and versions, contract drift against IC's contract docs
+(or `contract: in sync`), pending briefs, `recent IC writes (last 24h): N` with one line each,
+documents not revised for `--stale-days` (default `session_open.stale_days`
 in `config.yaml`, else 30), and one `WARN` line per problem. It never writes anything and always
 exits 0. `.claude/settings.json` runs it as the `SessionStart` hook, so its output opens every
 session; the hook falls back to `python3 -m hub` and never fails the session if `hub` is absent.
@@ -95,6 +108,9 @@ hub/cli.py       argparse entry point; one function per subcommand
 hub/importer.py  claude.ai export reader behind `hub import claude-export`
 hub/custodian.py custodian CSV reader behind `hub custodian import` (synonym maps, preamble skip)
 hub/producers/   read-only producer adapters (mv-analyst index/analyses, week-ahead ledger/beats, triage queue)
+hub/ic.py        IC adapter: pack read path plus the write client (`IcClient.call`, name resolution)
+hub/ic_writes.py the advisor-action planners, the `ic_writes` log, receipts and revert
+hub/ic_cli.py    argparse wiring for the `hub ic` write verbs
 hub/store.py     SQLite connection, migrations, document revisions, custodian snapshots, backups
 hub/restore.py   backup restore check (integrity, tables, row counts)
 hub/migrations/  numbered SQL migrations (NNNN_name.sql), shipped as package data
@@ -108,8 +124,64 @@ ROADMAP.md       architecture and phases
 
 Sources feed a sweep that scores findings deterministically, then drafts a brief only above a
 threshold. The operator's answer opens an advisor session seeded with the brief. The hub reads IC
-through its API with a read-only token; changes flow back as handoff blocks the operator approves.
-See `ROADMAP.md` for the diagram. Do not bypass the handoff step.
+through its API; the session writes changes back itself with `hub ic` verbs.
+See `ROADMAP.md` for the diagram. Make every IC change through a `hub ic` verb, never by calling
+IC's write API by hand, so it is logged, receipted and revertible.
+
+## Writing to IC
+
+Run `hub ic ...` from the instance directory with `IC_API_TOKEN` in the environment. Each verb
+resolves names (never ids) and reads the before-state. It then records a `pending` `ic_writes`
+row (`id, at, action, target, method, path, request, before, after, ic_id, receipt_id,
+receipt_error, source_ref, reverted_by, status, error`) BEFORE sending, sends the request, reads
+the after-state and marks the row `applied`. If IC refuses the request (HTTP below 500) the row
+becomes `failed` and nothing changed. If there is no answer (timeout, dropped connection, 5xx) the
+row becomes `unknown` with a `WARN`: IC may have applied it, so check IC before retrying. Last it
+posts a receipt to IC (`POST /export/handoff-receipts`, `source: investing_hub`). A receipt
+failure never undoes the write; it is recorded in `receipt_error` and printed as a `WARN`.
+`hub ic writes` shows each row's status.
+
+This depends on IC PR #383 being deployed (with #381): it adds `GET /triggers` and
+`GET /triggers/{id}` to the advisor token and lets `PUT`/`DELETE /events/{uuid}` through. `--dry-run` prints the resolved
+request and sends nothing (it still reads to resolve names). `--source-ref` records provenance.
+
+Name resolution: an alert is matched by exact name, else a unique prefix; a watchlist item by
+symbol, plus `--watchlist NAME` when the symbol is on several; an account by name. Zero or several
+matches stop with an error listing the candidates. Triggers are found by name through
+`GET /triggers` (or by `--id`), with before and after state from `GET /triggers/{id}`. Events are
+addressed by `--id` (printed by `event add`): IC's advisor token can read no single event, so event
+updates and removals capture no before-state. Fields: `--thesis` replaces, `--append-thesis` appends,
+`--clear FIELD` sets a field to null, `--entry-zone tier:low:high` repeats (empty bound = null).
+
+Confirmation policy (enforced in `hub/ic_writes.py`): `trade log`, and any write that deactivates
+or removes an alert (`alert modify --inactive`, `alert remove`, or a revert that does either),
+need `--yes`. Confirm with Andrew in chat first, then pass `--yes`. Everything else applies
+directly.
+
+`hub ic revert ID` undoes one write and logs the revert. A create is removed where IC has a
+delete route (alerts, events); a modify is restored from the recorded before-state (changed
+fields only); a removed alert is re-created from its before-state (new id; trigger links are not
+restored); a trigger update is restored like any modify. Everything else (trades, watchlist
+items and watchlists, ratios, lessons, trigger adds and retires, event edits and removals) is
+refused with the reason. Only `applied` writes can be reverted. It also refuses when IC no longer
+matches the recorded after-state, or, for events (which the token cannot read), when a later hub
+write touched the same event.
+
+The handoff flow is retired. Migration 0007 leaves the old `handoffs` table and its rows alone;
+nothing uses it. IC's contract docs still describe handoff blocks as an optional legacy path;
+ignore that path.
+
+## Session start and follow-ups
+
+- At session start, state the date and time from the `now:` line of `hub session-open` before
+  anything else. Do not guess the date or the weekday.
+- When Andrew agrees to a dated action (for example "CCJ GTCs expire Oct 15: check fill, log
+  trade"), record it in kitchen-table with the `table` CLI: `table commit add "ACTION" --cue-type
+  date --cue-value YYYY-MM-DD --source investing-hub`; use `table followup add` and `table thread
+  touch` for follow-ups and the conversation thread. The binary is `$TABLE_BIN` (default
+  `table`); if it is absent, say so in one line and carry on.
+- The flow is one way. Put the action text and date in kitchen-table, but never let kitchen-table
+  read hub or IC data, and do not paste holdings, values or account names into it.
 
 ## Database / storage
 
@@ -139,7 +211,8 @@ database mid-write. Backups are `backups/hub-<UTC timestamp>.db`; a copy that fa
 
 | Variable | Purpose |
 |---|---|
-| `IC_API_TOKEN` | Read-only IC token, resolved at call time from a credential manager; never stored in the repo |
+| `IC_API_TOKEN` | IC API token carrying both `pack:read` and `advisor:write` (the pack reads and the `hub ic` write verbs), resolved at call time from a credential manager; never stored in the repo |
+| `TABLE_BIN` | Optional; the kitchen-table `table` binary used to record follow-ups (default `table`). Absent is fine: skip with a note |
 | `HUB_IC_BASE_URL` | Optional; overrides `ic.base_url` from `config.yaml` (see `config.example.yaml`) |
 | `MASSIVE_API_KEY` | Massive market-data key, read by the `massive` MCP server declared in `.mcp.json`, either via `${MASSIVE_API_KEY}` expansion (resolved from `.env.local` at launch) or resolved by the server itself from a gitignored `.env.massive` (README "Resolving the key per server"); never commit it |
 | `OP_CONNECT_HOST` | 1Password Connect URL (`http://<connect-host>:8090`); selects the `connect` path of `scripts/hub-session.sh`, which resolves `.env.local` via `~/.claude/scripts/op-resolve.py` and starts `claude` so `MASSIVE_API_KEY` and `IC_API_TOKEN` reach the session |

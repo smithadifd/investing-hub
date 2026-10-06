@@ -679,6 +679,8 @@ def test_migration_0003_adds_account_and_list_derives_it_for_older_rows(tmp_path
         "0003_custodian_account.sql",
         "0004_producer_cursors.sql",
         "0005_producer_cursor_identity.sql",
+        "0006_ic_writes.sql",
+        "0007_handoffs_retired.sql",
     ]
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(custodian_snapshots)")}
     assert "account" in columns

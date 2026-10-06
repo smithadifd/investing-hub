@@ -248,8 +248,8 @@ def test_summary_counts_warnings(live, good_backup, capsys):
     assert "all" not in summary
     # The number of passed checks tracks the table count: each table in the
     # live store produces one PASS row in the restore-check output, so adding a
-    # table bumps it. producer_cursors (migration 0004) is the eleventh.
-    assert summary == "PASS: 13 passed, 2 warned, 0 failed"
+    # table bumps it. ic_writes (migration 0006) is the twelfth.
+    assert summary == "PASS: 14 passed, 2 warned, 0 failed"
 
 
 def test_summary_without_warnings_says_all_passed(live, good_backup, capsys):

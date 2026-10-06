@@ -2,8 +2,8 @@
 
 **Status:** foundation commands are implemented: database init, migration, backup and restore
 checks; claude.ai export import; IC pack pull, docs and show; document list, show and revise;
-custodian import and list; and session-open checks. The scheduled scoring pass, notifier, session launcher and
-handoff approval loop remain planned. This file is public-safe: no portfolio data, account
+custodian import and list; and session-open checks. The scheduled scoring pass, notifier, session launcher
+remain planned. Direct IC writes (`hub ic` verbs, the `ic_writes` log and revert) are implemented. This file is public-safe: no portfolio data, account
 numbers, or personal specifics belong here.
 
 ## What it is
@@ -25,16 +25,19 @@ fill-in-the-blanks kit into a working, cloneable companion.
 
 ## Principles
 
-1. **Tightly integrated, loosely coupled.** The hub reads IC through its API. It writes to IC only
-   through handoff blocks, which IC's executor applies after the operator approves them.
+1. **Tightly integrated, loosely coupled.** The hub reads IC through its API and the room session
+   writes to it directly with an `advisor:write` token (`hub ic ...` verbs). No handoff step sits
+   between the decision and the change (settled 2026-10-06). Every write is logged in `ic_writes`
+   and posted to IC as a receipt, and can be reverted where IC has an endpoint to undo it.
 2. **Public template, private instance.** The repo is only machinery. Personal data lives in local
    SQLite and gitignored local files and is never committed.
 3. **Each repo writes only its own files; any repo may read the others.** This is the same
    flywheel rule week-ahead and mv-analyst already follow.
 4. **Deterministic scoring before generation.** The sweep's scoring stage has no model in it, so
    every ping can say why it fired and no level can be hallucinated.
-5. **The hub never executes trades.** Destructive IC actions stay approval-gated, as in IC's own
-   contract.
+5. **The hub never executes trades.** `trade log` records a trade the operator already made. It and
+   any alert deactivation or removal need `--yes`, passed only after the operator confirms in chat.
+   Everything else applies directly.
 6. **Provenance is required.** Every level cites a named series and an as-of date. Every document
    revision records what triggered it.
 7. **The operator's attention is the scarce resource.** The sweep is tuned for precision, and the
@@ -56,8 +59,8 @@ fill-in-the-blanks kit into a working, cloneable companion.
  │                                   SEAT LAUNCHER: cmux workspace, Claude Code in
  │                                   remote-control mode, seeded with the brief
  │                                                   ▼
- │   receipts          handoff block        ADVISOR SESSION (interactive)
- └── executor ◀──── (operator approves) ◀── doc revisions · decisions · handoffs
+ │   receipts          direct writes        ADVISOR SESSION (interactive)
+ └── IC API ◀──────── (`hub ic` verbs) ◀──── doc revisions · decisions · ic_writes
                                                      │
                                                      ▼
                                           SQLite knowledge store (local)
@@ -67,7 +70,7 @@ fill-in-the-blanks kit into a working, cloneable companion.
 |---|---|
 | Advisor seat | Interactive Claude Code sessions in this repo, local or reached from a phone through remote control |
 | Knowledge store | Local SQLite: versioned documents plus the hub's own state (see Data model) |
-| IC adapter | Reads the pack from `GET /api/v1/export/context-pack` with a read-only token. Writes are handoff files only |
+| IC adapter | Reads the pack from `GET /api/v1/export/context-pack` with a read-only token. Writes go straight to IC through `hub ic` verbs with an `advisor:write` token, each logged in `ic_writes` |
 | Source adapters | Producers (reference instance: week-ahead briefs, mv-analyst index and analyses, feed-condenser, a newsletter triage queue) and market data (Massive) |
 | Sweep | Scheduled on the always-on Mac. Stage 0 scores, stage 1 drafts |
 | Notifier adapter | Reference: herald asks (Discord buttons, default-if-unanswered, deadlines). Template fallback: webhook or ntfy |
@@ -82,10 +85,13 @@ fill-in-the-blanks kit into a working, cloneable companion.
 | `findings` | Sweep output: kind, subject, score, evidence (JSON), status |
 | `asks` | Pitched asks: options, default, deadline, answer, answered_at |
 | `briefs` | Session briefs: pending, accepted, consumed |
-| `handoffs` | Handoff blocks: draft → approved → applied, linked to the IC receipt |
+| `ic_writes` | Every direct IC write and revert: action, target, request, before and after state, IC id, receipt id, provenance, and the revert that undid it |
 | `decisions` | Decision journal: subject, decision, rationale, links |
 | `calls` | The operator's own dated calls and how they resolved. Guests' calls stay in mv-analyst and are referenced, not copied |
 | `beats_proposals` | Proposed edits to the producers' shared interests file |
+
+The `handoffs` table from migration 0001 is retired: existing rows are kept (migration 0007 changes
+nothing) but no command reads or writes it.
 
 Live portfolio positions belong in IC's trade log, not here. The hub keeps only what IC doesn't
 model, such as off-book assets and account metadata.
@@ -93,18 +99,23 @@ model, such as off-book assets and account metadata.
 ## Interaction flows
 
 - **A. Session open.** A SessionStart hook pulls the pack, runs freshness and completeness checks
-  and a contract-version check, then lists pending briefs, unapplied handoffs and stale documents.
+  and a contract-version check, then lists pending briefs, recent IC writes (last 24h) and stale documents. It also prints
+  a `now:` line (local weekday, date, time and zone) so the session can state the time first.
 - **B. Sweep → ask → session.** The sweep scores, a finding crosses the threshold, a brief is
   drafted and the ask is pitched. On Yes, the seat launcher opens a workspace. If the operator is
   away, the brief waits.
-- **C. Handoff.** A session writes a block, the operator approves it, and the IC executor applies it
-  and posts a receipt. The next pack shows the receipt, the hub marks the handoff applied, and
-  proposes any document revisions that follow from it.
+- **C. Direct IC write.** The session runs a `hub ic` verb (`alert add`, `watchlist update-item`,
+  `trade log` and so on). The hub resolves names, reads the before-state, applies the change,
+  reads the after-state, logs an `ic_writes` row and posts an IC receipt (a receipt failure never
+  undoes the write). `hub ic writes` lists them and `hub ic revert ID` undoes one while IC still
+  matches what the hub left. `trade log` and any alert deactivation or removal need `--yes` after
+  the operator confirms in chat. The next pack shows the receipt, and the session proposes any
+  document revisions that follow.
 - **D. Keeping docs current (write-back policy).** Revisions follow the three-tier write-back policy:
   facts (receipts, imported trades, pack-derived state) apply directly with provenance via the
   shared kit's `changes` log; interpretations (producer analyses) are drafted as proposed revisions
   or briefs settled in session; levels and sizes (rungs, ladders, earmarks) are always proposed.
-  IC handoffs stay approval-gated as before. Stale documents become sweep findings.
+  IC writes follow flow C's confirmation policy. Stale documents become sweep findings.
 - **E. Interests.** The hub notices shifts in what the operator cares about (from what gets
   discussed and which asks get a Yes or Skip) and writes `beats_proposals`. It never edits the
   beats file directly.
@@ -133,7 +144,7 @@ model, such as off-book assets and account metadata.
   `source_kind = session` through `store.insert_document_revision` (body from a file or stdin,
   `source_ref` = the session handle), plus a read path `hub doc show <slug> [--revision N]` /
   `hub doc list`.
-- Backfill IC's trade log through approval-gated `LOG_TRADE` handoffs. This is IC's top "walk" item.
+- Backfill IC's trade log with `hub ic trade log --yes`, one confirmed trade at a time. This is IC's top "walk" item.
 - Verify every carried level against bars and attach provenance.
 - Re-baseline IC's state: current deployment host, status of #262/#263/#265, open bugs.
 - **Exit:** the documents, IC and the custodians agree, and every level has a named source.
@@ -196,7 +207,6 @@ model, such as off-book assets and account metadata.
 - Retire the Cowork producer path that was lost in the account migration.
 
 ### Later
-- Handoff approval as a herald ask ("Apply block N?").
 - Schwab API adapter to replace CSV imports.
 - Template polish: adapter docs, setup guide, demo data, onboarding interview (carried over from
   the starter kit's `ONBOARDING.md`).
@@ -262,17 +272,13 @@ directly it would have changed the session that raised it.
   as-of). Session-open lists windows opening in the next 10 days, and resting rungs (I1) inherit an
   expiry from the next window. IC's event seeding is the upstream source where it exists.
 - **Phase fit:** P1/P2.
-- **Sharpen:** hub-owned, or pushed to IC as `ADD_EVENT` handoffs only once confirmed?
+- **Sharpen:** hub-owned, or pushed to IC with `hub ic event add` only once confirmed?
 
-### I5. Handoff drafts in the store, not prose (raised 2026-10-02)
+### I5. Handoff drafts in the store, not prose (raised 2026-10-02, superseded 2026-10-06)
 - **Failure:** proposed IC edits were written as a table inside a knowledge document, so
   session-open reported "unapplied handoffs: 0" while about nine proposals were actually pending.
-- **Shape:** a thin first step of flow C: `hub handoff draft --file F` writes a `handoffs` row in
-  `draft`, `hub handoff list` shows it, and session-open counts it. Approval and application
-  stay manual until the executor loop exists.
-- **Phase fit:** P1. It is small and makes session-open truthful.
-- **Sharpen:** one block per proposal, or one block per session? How should a draft carry a
-  dependency on another ("held for the operator")?
+- **Resolution:** there are no handoffs to draft. The room applies the change itself with a
+  `hub ic` verb, and session-open reports "recent IC writes (last 24h)" from the `ic_writes` log.
 
 ### I6. Task export to the operator's task manager (raised 2026-10-02)
 - **Failure:** decisions ended a session as document prose. The operator asked for them as dated
@@ -280,7 +286,7 @@ directly it would have changed the session that raised it.
   per-session step through a connector.
 - **Shape:** a `tasks` adapter beside the notifier adapter. Decisions with an action and a date
   (I1 rungs, I4 windows, follow-up reviews) export as tasks with a stable external id. Reading
-  back completion closes the loop: a task marked done prompts a `LOG_TRADE` handoff or a document
+  back completion closes the loop: a task marked done prompts a `hub ic trade log` entry or a document
   revision at the next session-open. Notion is the reference adapter; a plain-file adapter is the
   template default.
 - **Phase fit:** P2 for export, and alongside flow D for read-back.
@@ -314,7 +320,8 @@ directly it would have changed the session that raised it.
 - **IC becomes the only owner of the contract docs** (`docs/api/handoff-schema.md`,
   `docs/api/advisor-actions.md`). The hub reads them from IC at the deployed version instead of
   keeping copies, which ends the recurring version drift.
-- **Read-only API token scope** for the hub: pack reads without write access.
+- **API token scopes** for the hub: `pack:read` for the pack, and `advisor:write` (IC #381) for
+  exactly the routes the advisor-action vocabulary maps to, plus the reads that resolve a name.
 - **Trade-log backfill** (P1).
 - Hub dependencies already on IC's list: deploy #262, land #265 (macro seeding), and add an
   "unavailable" mode.
@@ -331,7 +338,7 @@ directly it would have changed the session that raised it.
   1. *Facts that must stay current* (receipts, imported trades, pack-derived state) apply directly with provenance; the shared kit's `changes` log is the mechanism.
   2. *Interpretation* (what a producer analysis means for a thesis) is drafted as a proposed revision or a brief and settled in a session.
   3. *Anything that sets a level or a size* (rungs, ladders, earmarks) is always proposed, never applied silently.
-  IC handoffs stay approval-gated as before.
+  IC writes are direct (settled 2026-10-06) under flow C's confirmation policy.
 - **Sweep cadence.** Pre-market daily plus post-close? Event-driven when a digest lands?
 - **Where IC serves contract docs from:** an API endpoint, or raw files at the deployed commit.
 - **Retention** for findings and asks.

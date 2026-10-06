@@ -1,4 +1,4 @@
-"""Read-only client for the Investing Companion (IC) export API.
+"""Client for the Investing Companion (IC) API: the pack read path and the advisor write path.
 
 The token comes from the ``IC_API_TOKEN`` environment variable at call time. It is never
 logged, never written to disk and never placed in an exception message: every error that
@@ -13,6 +13,7 @@ import functools
 import json
 import os
 import re
+import socket
 import tempfile
 import urllib.error
 import urllib.request
@@ -46,7 +47,14 @@ _META_KEYS = ("generated_at", "schema_version", "advisor_actions_version")
 
 
 class IcError(Exception):
-    """A failure talking to IC. The message is one line and already redacted."""
+    """A failure talking to IC. The message is one line and already redacted.
+
+    ``status`` is the HTTP status when IC answered, else None (no answer: timeout, refused).
+    """
+
+    status: int | None = None
+    # True when the request provably never reached IC (connection refused, DNS failure)
+    not_sent: bool = False
 
 
 def _clean_errors[**P, R](func: Callable[P, R]) -> Callable[P, R]:
@@ -104,7 +112,7 @@ def read_token(environ: Mapping[str, str] | None = None) -> _Token:
     env = os.environ if environ is None else environ
     value = env.get(TOKEN_ENV, "").strip()
     if not value:
-        raise IcError(f"{TOKEN_ENV} is not set; resolve the IC read-only token into the env")
+        raise IcError(f"{TOKEN_ENV} is not set; resolve the IC API token into the env")
     if not value.isascii() or any(ch.isspace() or not ch.isprintable() for ch in value):
         raise IcError(f"{TOKEN_ENV} contains whitespace, control or non-ASCII characters")
     return _Token(value)
@@ -172,31 +180,79 @@ def _build_opener() -> urllib.request.OpenerDirector:
 
 
 def _get_json(base_url: str, path: str, token: _Token, timeout: float) -> Any:
-    url = base_url + path
-    request = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {token.reveal()}", "Accept": "application/json"},
-        method="GET",
-    )
+    return _request(base_url, "GET", path, token, timeout)
+
+
+def _request(
+    base_url: str,
+    method: str,
+    path: str,
+    token: _Token,
+    timeout: float,
+    payload: Any = None,
+    *,
+    for_write: bool = False,
+) -> Any:
+    """One HTTP exchange. ``for_write`` allows an empty reply (204) and adds IC's error detail."""
+    headers = {"Authorization": f"Bearer {token.reveal()}", "Accept": "application/json"}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(base_url + path, data=data, headers=headers, method=method)
     try:
         with _build_opener().open(request, timeout=timeout) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
-        raise IcError(_http_error_line(exc.code, path)) from None
+        line = _http_error_line(exc.code, path)
+        detail = _error_detail(exc) if for_write else ""
+        error = IcError(f"{line}: {detail}" if detail else line)
+        error.status = exc.code
+        raise error from None
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise IcError(_timeout_line(base_url, timeout)) from None
+        never_sent = isinstance(exc.reason, ConnectionRefusedError | socket.gaierror)
         if isinstance(exc.reason, ConnectionRefusedError):
-            raise IcError(f"cannot reach IC at {base_url}: connection refused") from None
-        raise IcError(f"cannot reach IC at {base_url}: {exc.reason}") from None
+            error = IcError(f"cannot reach IC at {base_url}: connection refused")
+        else:
+            error = IcError(f"cannot reach IC at {base_url}: {exc.reason}")
+        error.not_sent = never_sent
+        raise error from None
     except TimeoutError:
         raise IcError(_timeout_line(base_url, timeout)) from None
     except ConnectionRefusedError:
-        raise IcError(f"cannot reach IC at {base_url}: connection refused") from None
+        error = IcError(f"cannot reach IC at {base_url}: connection refused")
+        error.not_sent = True
+        raise error from None
+    if for_write and not body.strip():
+        return None
     try:
         return json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise IcError(f"IC returned a non-JSON response for {path}") from None
+
+
+def _error_detail(exc: urllib.error.HTTPError) -> str:
+    """IC's one-line validation message (FastAPI ``detail``), truncated; empty if unreadable."""
+    try:
+        payload = json.loads(exc.read())
+    except Exception:
+        return ""
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if isinstance(item, dict):
+                where = ".".join(str(p) for p in item.get("loc", []) if p != "body")
+                parts.append(f"{where}: {item.get('msg')}" if where else str(item.get("msg")))
+            else:
+                parts.append(str(item))
+        detail = "; ".join(parts)
+    if not isinstance(detail, str):
+        return ""
+    detail = " ".join(detail.split())
+    return detail if len(detail) <= 300 else detail[:297] + "..."
 
 
 def _timeout_line(base_url: str, timeout: float) -> str:
@@ -290,3 +346,167 @@ def pull_pack(
     except OSError as exc:
         raise IcError(f"cannot write the pack under {pack_dir}: {exc.strerror}") from None
     return meta
+
+
+def request_json(
+    base_url: str,
+    method: str,
+    path: str,
+    token: _Token,
+    payload: Any = None,
+    timeout: float | None = None,
+) -> Any:
+    """Send ``method path`` (optional JSON body) and return the decoded JSON, or None for an
+    empty reply. Errors leave as one redacted line carrying IC's validation detail."""
+    timeout = TIMEOUT_SECONDS if timeout is None else timeout
+    status, not_sent = None, False
+    try:
+        return _request(base_url, method.upper(), path, token, timeout, payload, for_write=True)
+    except IcError as exc:
+        message, status, not_sent = redact(str(exc), token), exc.status, exc.not_sent
+    except Exception as exc:
+        message = redact(f"IC request failed: {type(exc).__name__}: {exc}", token)
+    error = IcError(message)
+    error.status = status
+    error.not_sent = not_sent
+    raise error from None
+
+
+# --- advisor write client -------------------------------------------------------------------
+
+API = "/api/v1"
+MAX_LISTED = 20
+
+
+class ResolutionError(IcError):
+    """A name matched zero or several things; the message lists the candidates."""
+
+
+class IcClient:
+    """The advisor write client: ``call`` plus name resolution over IC's list endpoints.
+
+    ``call`` returns IC's payload unwrapped from ``{"data": ...}`` (None for an empty reply).
+    The token must carry the ``advisor:write`` scope for anything but pack reads.
+    """
+
+    def __init__(self, base_url: str, token: _Token, timeout: float | None = None) -> None:
+        self.base_url = base_url
+        self.token = token
+        self.timeout = timeout
+
+    @classmethod
+    def from_env(cls) -> IcClient:
+        return cls(load_base_url(), read_token())
+
+    def call(self, method: str, path: str, body: Any = None) -> Any:
+        reply = request_json(self.base_url, method, path, self.token, body, self.timeout)
+        if isinstance(reply, dict) and "data" in reply:
+            return reply["data"]
+        return reply
+
+    # reads used to resolve names and capture state
+
+    def alerts(self) -> list[dict]:
+        return _as_list(self.call("GET", f"{API}/alerts"), "alerts")
+
+    def watchlists(self) -> list[dict]:
+        return _as_list(self.call("GET", f"{API}/watchlists"), "watchlists")
+
+    def watchlist(self, watchlist_id: int | str) -> dict:
+        data = self.call("GET", f"{API}/watchlists/{watchlist_id}")
+        if not isinstance(data, dict):
+            raise IcError("IC returned an unexpected watchlist payload")
+        return data
+
+    def triggers(self, include_retired: bool = False) -> list[dict]:
+        query = "?include_retired=true" if include_retired else ""
+        return _as_list(self.call("GET", f"{API}/triggers{query}"), "triggers")
+
+    def trigger(self, trigger_id: int | str) -> dict | None:
+        """One trigger by id (``GET /triggers/{id}``, retired ones included); None if absent."""
+        try:
+            data = self.call("GET", f"{API}/triggers/{trigger_id}")
+        except IcError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if not isinstance(data, dict):
+            raise IcError("IC returned an unexpected trigger payload")
+        return data
+
+    def accounts(self) -> list[dict]:
+        return _as_list(self.call("GET", f"{API}/accounts"), "accounts")
+
+    # resolution: exact name, else unique prefix; zero or several matches raise
+
+    def find_alert(self, name: str) -> dict:
+        return resolve_name(self.alerts(), name, "alert")
+
+    def find_watchlist(self, name: str) -> dict:
+        return resolve_name(self.watchlists(), name, "watchlist")
+
+    def find_account(self, name: str) -> dict:
+        return resolve_name(self.accounts(), name, "account")
+
+    def find_item(self, symbol: str, watchlist_name: str | None = None) -> tuple[dict, dict]:
+        """The watchlist item for ``symbol`` as ``(watchlist, item)``.
+
+        With ``watchlist_name`` only that watchlist is searched; without it every watchlist is,
+        and a symbol on several watchlists is an error naming each one.
+        """
+        symbol = symbol.strip().upper()
+        if watchlist_name is not None:
+            picked = [self.watchlist(self.find_watchlist(watchlist_name)["id"])]
+        else:
+            picked = [self.watchlist(w["id"]) for w in self.watchlists()]
+        hits = [
+            (w, item)
+            for w in picked
+            for item in w.get("items") or []
+            if str((item.get("equity") or {}).get("symbol", "")).upper() == symbol
+        ]
+        if len(hits) == 1:
+            return hits[0]
+        if not hits:
+            where = f" on watchlist {picked[0].get('name')!r}" if watchlist_name else ""
+            raise ResolutionError(f"no watchlist item for {symbol}{where}")
+        names = ", ".join(f"{symbol} ({w.get('name')})" for w, _ in hits)
+        raise ResolutionError(
+            f"{symbol} is on {len(hits)} watchlists: {names}; pass --watchlist NAME to choose"
+        )
+
+
+def _as_list(data: Any, what: str) -> list[dict]:
+    if not isinstance(data, list):
+        raise IcError(f"IC returned an unexpected {what} payload")
+    return [row for row in data if isinstance(row, dict)]
+
+
+def resolve_name(rows: list[dict], query: str, label: str, key: str = "name") -> dict:
+    """The one row whose ``key`` equals ``query`` (case-insensitive), else the one whose ``key``
+    starts with it. Zero or several matches raise :class:`ResolutionError` listing candidates."""
+    wanted = query.strip().casefold()
+    names = [str(row.get(key, "")) for row in rows]
+    exact = [r for r, n in zip(rows, names, strict=True) if n.casefold() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        raise ResolutionError(_ambiguous(label, query, exact, key))
+    prefix = [
+        r for r, n in zip(rows, names, strict=True) if wanted and n.casefold().startswith(wanted)
+    ]
+    if len(prefix) == 1:
+        return prefix[0]
+    if prefix:
+        raise ResolutionError(_ambiguous(label, query, prefix, key))
+    shown = ", ".join(repr(n) for n in names[:MAX_LISTED])
+    if len(names) > MAX_LISTED:
+        shown += f", ... ({len(names)} total)"
+    raise ResolutionError(
+        f"no {label} matches {query!r}" + (f"; known {label}s: {shown}" if shown else "")
+    )
+
+
+def _ambiguous(label: str, query: str, rows: list[dict], key: str) -> str:
+    cands = ", ".join(f"{r.get(key)!r} (id {r.get('id')})" for r in rows[:MAX_LISTED])
+    return f"{len(rows)} {label}s match {query!r}: {cands}; use a longer or exact name"
