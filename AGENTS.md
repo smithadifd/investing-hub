@@ -51,7 +51,7 @@ hub custodian list         # snapshots: custodian, account, kind, as_of, importe
 hub producers list [--db PATH] [--mv-analyst-root R] [--week-ahead-root R] [--triage-queue-dir D]  # stage-0 candidates; stateful: advances the triage cursor and writes beat proposals
 hub ic show [--counts]     # counts-only view of the cached context pack
 hub session-open           # print the session status block; always exits 0, read-only
-hub ic alert add|modify|remove ...            # IC alerts (modify --inactive and remove need --yes)
+hub ic alert add|modify|remove ...            # IC alerts (thresholds, --inactive and remove need --yes)
 hub ic watchlist add-item|update-item|create ...  # watchlists and items
 hub ic event add|update|remove ...            # calendar events
 hub ic trade log SYMBOL --type T --quantity N --price P --yes  # log a trade (needs --yes)
@@ -153,10 +153,16 @@ addressed by `--id` (printed by `event add`): IC's advisor token can read no sin
 updates and removals capture no before-state. Fields: `--thesis` replaces, `--append-thesis` appends,
 `--clear FIELD` sets a field to null, `--entry-zone tier:low:high` repeats (empty bound = null).
 
-Confirmation policy (enforced in `hub/ic_writes.py`): `trade log`, and any write that deactivates
-or removes an alert (`alert modify --inactive`, `alert remove`, or a revert that does either),
-need `--yes`. Confirm with Andrew in chat first, then pass `--yes`. Everything else applies
-directly.
+Confirmation policy (enforced in `hub/ic_writes.py`): these need `--yes`. Confirm with Andrew in
+chat first, then pass `--yes`.
+- `trade log`;
+- any write that deactivates or removes an alert (`alert modify --inactive`, `alert remove`, or a
+  revert that does either);
+- any write that sets, changes or clears a level: every `alert add`, an alert's threshold or
+  condition (`alert modify --threshold|--condition`), a watchlist item's `--target-price` or `--entry-zone` (or `--clear` of either),
+  or a revert that restores one. Levels and sizes are always proposed, never applied silently.
+
+Everything else (notes, theses, names, cooldowns, events, triggers, lessons) applies directly.
 
 `hub ic revert ID` undoes one write and logs the revert. A create is removed where IC has a
 delete route (alerts, events); a modify is restored from the recorded before-state (changed

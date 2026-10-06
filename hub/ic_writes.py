@@ -7,8 +7,10 @@ it sends the request, reads the after-state, records an ``ic_writes`` row and po
 receipt. A receipt failure never undoes the write; it is recorded on the row.
 
 Confirmation policy (the session confirms with the operator in chat first, then passes
-``--yes``): ``trade log`` and any write that deactivates or removes an alert require ``--yes``.
-Everything else applies directly. See ``AGENTS.md``.
+``--yes``): ``trade log``, any write that deactivates or removes an alert, and any write that
+sets or changes a level (an alert threshold, a watchlist item's target price or entry zones,
+including a revert that restores one) require ``--yes``. Everything else applies directly.
+See ``AGENTS.md``.
 """
 
 from __future__ import annotations
@@ -48,6 +50,25 @@ CLEARABLE_ITEM_FIELDS = ("thesis", "notes", "target_price", "entry_zones", "cata
 NEEDS_YES_TRADE = "logs a trade"
 NEEDS_YES_DEACTIVATE = "deactivates an alert"
 NEEDS_YES_REMOVE = "removes an alert"
+NEEDS_YES_LEVEL = "sets or changes a level"
+# condition_type counts: flipping above/below, or to or from entry_zone, changes what level the
+# alert fires at, and adding any alert (always with a condition) sets one.
+LEVEL_FIELDS = ("threshold_value", "condition_type", "target_price", "entry_zones")
+
+
+def level_yes(body: dict | None) -> str | None:
+    """NEEDS_YES_LEVEL when `body` sets, changes or clears a level, else None."""
+    touched = [k for k in LEVEL_FIELDS if body and k in body]
+    return f"{NEEDS_YES_LEVEL} ({', '.join(touched)})" if touched else None
+
+
+def alert_yes(body: dict | None) -> str | None:
+    """Every reason an alert write needs --yes, so the confirmation names all of them."""
+    reasons = [NEEDS_YES_DEACTIVATE] if body and body.get("is_active") is False else []
+    level = level_yes(body)
+    if level:
+        reasons.append(level)
+    return " and ".join(reasons) or None
 
 
 class WriteError(Exception):
@@ -496,7 +517,7 @@ def plan_alert_add(client: ic.IcClient, a: Any) -> Plan:
     _set(body, "notes", a.notes)
     if a.is_active is False:
         body["is_active"] = False
-    return Plan("ADD_ALERT", label, "POST", f"{API}/alerts", body)
+    return Plan("ADD_ALERT", label, "POST", f"{API}/alerts", body, needs_yes=level_yes(body))
 
 
 def _alert_changes(a: Any) -> dict[str, Any]:
@@ -526,7 +547,7 @@ def plan_alert_modify(client: ic.IcClient, a: Any) -> Plan:
         body,
         before=alert,
         ic_id=str(alert["id"]),
-        needs_yes=NEEDS_YES_DEACTIVATE if body.get("is_active") is False else None,
+        needs_yes=alert_yes(body),
     )
 
 
@@ -571,6 +592,7 @@ def plan_watchlist_add_item(client: ic.IcClient, a: Any) -> Plan:
         "POST",
         f"{API}/watchlists/{watchlist['id']}/items",
         body,
+        needs_yes=level_yes(body),
     )
 
 
@@ -602,6 +624,7 @@ def plan_watchlist_update_item(client: ic.IcClient, a: Any) -> Plan:
         body,
         before=item,
         ic_id=f"{watchlist['id']}:{item['id']}",
+        needs_yes=level_yes(body),
         notes=notes,
     )
 
@@ -963,6 +986,7 @@ def plan_revert(conn: sqlite3.Connection, client: ic.IcClient, write_id: int) ->
             "POST",
             f"{API}/alerts",
             body,
+            level_yes(body),
             notes=["the re-created alert gets a new IC id; trigger links it had are not restored"],
         )
     raise WriteError(_irreversible(row))
@@ -980,7 +1004,7 @@ def _plan_revert_modify(client, conn, row, plan, keys, what, before, request) ->
             restore[key] = before[key]
     if not restore:
         raise WriteError("the recorded before-state has none of the changed fields")
-    needs_yes = NEEDS_YES_DEACTIVATE if restore.get("is_active") is False else None
+    needs_yes = alert_yes(restore)
     live = _live_or_none(client, row)
     return plan("PUT", row["path"], restore, needs_yes, before=live, ic_id=row["ic_id"])
 
