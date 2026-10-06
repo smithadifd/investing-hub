@@ -131,18 +131,26 @@ IC's write API by hand, so it is logged, receipted and revertible.
 ## Writing to IC
 
 Run `hub ic ...` from the instance directory with `IC_API_TOKEN` in the environment. Each verb
-resolves names (never ids), reads the before-state, sends the request, reads the after-state,
-records an `ic_writes` row (`id, at, action, target, method, path, request, before, after, ic_id,
-receipt_id, receipt_error, source_ref, reverted_by`) and posts a receipt to IC
-(`POST /export/handoff-receipts`, `source: investing_hub`). A receipt failure never undoes the
-write; it is recorded in `receipt_error` and printed as a `WARN`. `--dry-run` prints the resolved
+resolves names (never ids) and reads the before-state. It then records a `pending` `ic_writes`
+row (`id, at, action, target, method, path, request, before, after, ic_id, receipt_id,
+receipt_error, source_ref, reverted_by, status, error`) BEFORE sending, sends the request, reads
+the after-state and marks the row `applied`. If IC refuses the request (HTTP below 500) the row
+becomes `failed` and nothing changed. If there is no answer (timeout, dropped connection, 5xx) the
+row becomes `unknown` with a `WARN`: IC may have applied it, so check IC before retrying. Last it
+posts a receipt to IC (`POST /export/handoff-receipts`, `source: investing_hub`). A receipt
+failure never undoes the write; it is recorded in `receipt_error` and printed as a `WARN`.
+`hub ic writes` shows each row's status.
+
+This depends on IC PR #383 being deployed (with #381): it adds `GET /triggers` and
+`GET /triggers/{id}` to the advisor token and lets `PUT`/`DELETE /events/{uuid}` through. `--dry-run` prints the resolved
 request and sends nothing (it still reads to resolve names). `--source-ref` records provenance.
 
 Name resolution: an alert is matched by exact name, else a unique prefix; a watchlist item by
 symbol, plus `--watchlist NAME` when the symbol is on several; an account by name. Zero or several
-matches stop with an error listing the candidates. Triggers are found by name in the cached pack
-(`hub ic pull`) or by `--id`; events by `--id` (printed by `event add`), because IC's advisor token
-has no read route for either. Fields: `--thesis` replaces, `--append-thesis` appends,
+matches stop with an error listing the candidates. Triggers are found by name through
+`GET /triggers` (or by `--id`), with before and after state from `GET /triggers/{id}`. Events are
+addressed by `--id` (printed by `event add`): IC's advisor token can read no single event, so event
+updates and removals capture no before-state. Fields: `--thesis` replaces, `--append-thesis` appends,
 `--clear FIELD` sets a field to null, `--entry-zone tier:low:high` repeats (empty bound = null).
 
 Confirmation policy (enforced in `hub/ic_writes.py`): `trade log`, and any write that deactivates
@@ -153,10 +161,11 @@ directly.
 `hub ic revert ID` undoes one write and logs the revert. A create is removed where IC has a
 delete route (alerts, events); a modify is restored from the recorded before-state (changed
 fields only); a removed alert is re-created from its before-state (new id; trigger links are not
-restored). Everything else (trades, watchlist items and watchlists, ratios, lessons, triggers,
-event edits and removals) is refused with the reason. It also refuses when IC no longer matches
-the recorded after-state, or, for resources the token cannot read, when a later hub write
-touched the same resource.
+restored); a trigger update is restored like any modify. Everything else (trades, watchlist
+items and watchlists, ratios, lessons, trigger adds and retires, event edits and removals) is
+refused with the reason. Only `applied` writes can be reverted. It also refuses when IC no longer
+matches the recorded after-state, or, for events (which the token cannot read), when a later hub
+write touched the same event.
 
 The handoff flow is retired. Migration 0007 leaves the old `handoffs` table and its rows alone;
 nothing uses it. IC's contract docs still describe handoff blocks as an optional legacy path;

@@ -115,17 +115,48 @@ def test_migrations_apply_in_order_and_keep_existing_handoffs(tmp_path):
     columns = [r["name"] for r in conn.execute("PRAGMA table_info(ic_writes)")]
     assert columns == [
         "id", "at", "action", "target", "method", "path", "request", "before", "after",
-        "ic_id", "receipt_id", "receipt_error", "source_ref", "reverted_by",
+        "ic_id", "receipt_id", "receipt_error", "source_ref", "reverted_by", "status", "error",
     ]  # fmt: skip
     assert store.migrate(conn) == []
     conn.close()
 
 
-def test_no_code_touches_the_handoffs_table():
+def test_only_session_open_reads_the_handoffs_table_and_nothing_writes_it():
     root = Path(__file__).resolve().parent.parent
-    offenders = [
-        p.name
-        for p in (root / "hub").rglob("*.py")
-        if any(verb in p.read_text().lower() for verb in ("from handoffs", "into handoffs"))
-    ]
-    assert offenders == []
+    for path in (root / "hub").rglob("*.py"):
+        text = path.read_text().lower()
+        assert not any(
+            v in text for v in ("into handoffs", "update handoffs", "delete from handoffs")
+        )
+        if path.name != "session_open.py":
+            assert "from handoffs" not in text
+
+
+def test_legacy_handoff_rows_warn_once(env, capsys):
+    conn = sqlite3.connect(env / "data" / "hub.db")
+    for status in ("draft", "approved", "applied"):
+        conn.execute("INSERT INTO handoffs (body, status) VALUES ('x', ?)", (status,))
+    conn.commit()
+    conn.close()
+    out = _block(capsys)
+    warns = [ln for ln in out.splitlines() if "legacy handoffs" in ln]
+    assert warns == ["WARN 2 legacy handoffs unapplied (handoffs retired; apply or ignore)"]
+
+
+def test_no_legacy_warning_when_none_unapplied(env, capsys):
+    assert "legacy handoffs" not in _block(capsys)
+
+
+def test_failed_writes_are_not_counted_as_recent(env, capsys):
+    _log(env, datetime.now(UTC))
+    conn = sqlite3.connect(env / "data" / "hub.db")
+    conn.execute(
+        "INSERT INTO ic_writes (at, action, target, method, path, status)"
+        " VALUES (?, 'ADD_ALERT', 'ZZZ', 'POST', '/x', 'failed')",
+        (ic_writes.iso_ms(datetime.now(UTC)),),
+    )
+    conn.execute("UPDATE ic_writes SET status = 'unknown' WHERE id = 1")
+    conn.commit()
+    conn.close()
+    out = _block(capsys)
+    assert "recent IC writes (last 24h): 1" in out and "[unknown]" in out and "ZZZ" not in out

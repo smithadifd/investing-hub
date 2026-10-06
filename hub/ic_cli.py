@@ -17,6 +17,27 @@ Handler = Callable[[argparse.Namespace], int]
 Adder = Callable[[argparse.ArgumentParser], None]
 
 IMPORTANCE = ("low", "medium", "high")
+# IC's EventType enum (backend/app/schemas/economic_event.py)
+EVENT_TYPES = (
+    "earnings",
+    "ex_dividend",
+    "dividend_pay",
+    "stock_split",
+    "fomc",
+    "cpi",
+    "ppi",
+    "nfp",
+    "gdp",
+    "pce",
+    "retail_sales",
+    "unemployment",
+    "ism_manufacturing",
+    "ism_services",
+    "housing_starts",
+    "consumer_confidence",
+    "custom",
+    "ipo",
+)
 CATEGORIES = ("commodity", "equity", "macro", "crypto")
 PERIODS = ("1d", "1w", "1m", "3m", "6m", "1y")
 
@@ -130,7 +151,7 @@ def _watchlist_create_args(p: argparse.ArgumentParser) -> None:
 
 def _event_add_args(p: argparse.ArgumentParser) -> None:
     _common(p)
-    p.add_argument("--type", default="custom", help="event_type (default: custom)")
+    p.add_argument("--type", default="custom", choices=EVENT_TYPES, help="default: custom")
     p.add_argument("--title", required=True)
     p.add_argument("--date", required=True, metavar="YYYY-MM-DD")
     p.add_argument("--description")

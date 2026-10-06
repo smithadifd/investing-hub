@@ -73,6 +73,31 @@ class FakeIc:
         }
 
     @staticmethod
+    def _trigger(id_, name, rule, action, status="active"):
+        # TriggerResponse's real shape: no pack-only fields, alert links as summaries
+        return {
+            "id": id_,
+            "name": name,
+            "rule": rule,
+            "action": action,
+            "tier": None,
+            "display_order": 0,
+            "status": status,
+            "signal": "armed",
+            "executed_at": None,
+            "execution_note": None,
+            "alerts": [],
+            "created_at": "2026-10-01T00:00:00Z",
+        }
+
+    def _links(self, ids):
+        return [
+            {"id": a["id"], "name": a["name"], "is_active": a["is_active"]}
+            for a in self.alerts
+            if a["id"] in ids
+        ]
+
+    @staticmethod
     def _item(id_, wid, symbol, thesis=None):
         return {
             "id": id_,
@@ -148,10 +173,25 @@ class FakeIc:
             if method == "PUT":
                 return _Resp({"data": {"id": EVENT_ID, **body}})
             return _Resp(None, 204)
+        if path == f"{api}/triggers" and method == "GET":
+            return _Resp({"data": self.triggers})
         if path == f"{api}/triggers" and method == "POST":
-            return _Resp({"data": {"id": self._new(), **body}}, 201)
+            row = self._trigger(self._new(), body["name"], body["rule"], body["action"])
+            row.update({k: v for k, v in body.items() if k != "alert_ids"})
+            row["alerts"] = self._links(body.get("alert_ids", []))
+            self.triggers.append(row)
+            return _Resp({"data": row}, 201)
         if m := re.fullmatch(rf"{api}/triggers/(\d+)(/retire)?", path):
-            return _Resp({"data": {"id": int(m.group(1)), **(body or {})}})
+            row = next((t for t in self.triggers if t["id"] == int(m.group(1))), None)
+            if row is None:
+                self._err(404, "not found")
+            if method == "PUT":
+                row.update({k: v for k, v in body.items() if k != "alert_ids"})
+                if "alert_ids" in body:
+                    row["alerts"] = self._links(body["alert_ids"])
+            elif m.group(2):
+                row["status"] = "retired"
+            return _Resp({"data": row})
         if path in (f"{api}/lessons", f"{api}/ratios", f"{api}/watchlists") and method == "POST":
             return _Resp({"data": {"id": self._new(), **body}}, 201)
         self._err(403, "API tokens cannot access this endpoint")
@@ -266,7 +306,7 @@ def test_cli_surfaces_ambiguous_alert_name(env, fake, capsys):
 def test_zone_parsing():
     assert ic_writes.parse_zone("starter:48:50") == {"tier": "starter", "low": 48, "high": 50}
     assert ic_writes.parse_zone("deep::46") == {"tier": "deep", "low": None, "high": 46}
-    assert ic_writes.parse_zone("top:100.5:") == {"tier": "top", "low": 100.5, "high": None}
+    assert ic_writes.parse_zone("top:100.5:") == {"tier": "top", "low": "100.5", "high": None}
     for bad in ("x", "t::", "t:5:3", ":1:2", "t:a:2"):
         with pytest.raises(ic_writes.WriteError):
             ic_writes.parse_zone(bad)
@@ -289,7 +329,7 @@ def test_dry_run_renders_request_and_sends_nothing(env, fake, capsys):
         "equity_symbol": "CCC",
         "name": "CCC below 18.5",
         "notes": "tier one",
-        "threshold_value": 18.5,
+        "threshold_value": "18.5",
     }
     assert "nothing sent" in out
     assert fake.writes() == []
@@ -358,11 +398,11 @@ def test_modify_records_before_and_after(env, fake, capsys):
     assert code == 0, err
     (row,) = _rows(env)
     assert json.loads(row["before"])["threshold_value"] == "5.00"
-    assert json.loads(row["after"])["threshold_value"] == 4.5
+    assert json.loads(row["after"])["threshold_value"] == "4.5"
     assert json.loads(row["request"]) == {
         "cooldown_minutes": 120,
         "notes": "n",
-        "threshold_value": 4.5,
+        "threshold_value": "4.5",
     }
     assert row["ic_id"] == "3"
 
@@ -420,12 +460,12 @@ def test_watchlist_add_item_create_and_trade_event_trigger_lesson_ratio(env, fak
         assert code == 0, (step, err)
     sent = {(m, p): b for m, p, b in fake_calls if m == "POST" and "receipts" not in p}
     assert sent[("POST", "/api/v1/watchlists/1/items")] == {
-        "symbol": "DDD", "thesis": "t", "target_price": 12.5, "track_calendar": False,
+        "symbol": "DDD", "thesis": "t", "target_price": "12.5", "track_calendar": False,
     }  # fmt: skip
     assert sent[("POST", "/api/v1/watchlists")] == {"name": "New List", "description": "d"}
     assert sent[("POST", "/api/v1/events")]["event_date"] == "2026-10-15"
     trade = sent[("POST", "/api/v1/trades")]
-    assert trade["account_id"] == 7 and trade["executed_at"] == "2026-05-12T00:00:00"
+    assert trade["account_id"] == 7 and trade["executed_at"] == "2026-05-12T12:00:00.000Z"
     assert (trade["symbol"], trade["trade_type"], trade["fees"]) == ("AAA", "buy", 0)
     assert sent[("POST", "/api/v1/triggers")]["alert_ids"] == [3]
     assert sent[("POST", "/api/v1/lessons")] == {
@@ -439,7 +479,7 @@ def test_watchlist_add_item_create_and_trade_event_trigger_lesson_ratio(env, fak
     assert len(fake.receipts) == 7
 
 
-def test_ic_validation_error_detail_is_shown_and_nothing_is_logged(env, fake, capsys, monkeypatch):
+def test_ic_validation_error_detail_is_shown_and_logged_failed(env, fake, capsys, monkeypatch):
     real = fake._route
 
     def route(method, path, body):
@@ -453,7 +493,7 @@ def test_ic_validation_error_detail_is_shown_and_nothing_is_logged(env, fake, ca
     )
     assert code == 1
     assert "threshold_value: must be positive" in err
-    assert _rows(env) == [] and fake.receipts == []
+    assert [r["status"] for r in _rows(env)] == ["failed"] and fake.receipts == []
 
 
 def test_write_refused_before_sending_when_the_log_is_unavailable(env, fake, capsys):
@@ -649,28 +689,174 @@ def test_revert_dry_run_sends_nothing(env, fake, capsys):
     assert len(fake.writes()) == before and len(_rows(env)) == 1
 
 
-def test_trigger_update_resolves_name_from_cached_pack(env, fake, capsys):
-    pack = {"triggers": [{"id": 41, "name": "Test ladder", "status": "active", "rule": "r1",
-                          "action": "a1", "alerts": [{"id": 3}]},
-                         {"id": 42, "name": "Old ladder", "status": "retired"}]}  # fmt: skip
-    (env / "data" / "ic").mkdir(parents=True)
-    (env / "data" / "ic" / "pack-latest.json").write_text(json.dumps(pack))
-    (env / "data" / "ic" / "pack-meta.json").write_text(json.dumps({"fetched_at": "2026-10-06"}))
+def test_trigger_update_resolves_by_name_and_reverts_from_get_state(env, fake, capsys):
+    fake.triggers = [
+        fake._trigger(41, "Test ladder", "r1", "a1"),
+        fake._trigger(42, "Old ladder", "r0", "a0", status="retired"),
+    ]
+    fake.triggers[0]["alerts"] = fake._links([3])
+    code, out, err = _hub(capsys, "trigger", "update", "Test", "--action", "a2", "--alert", "AAA")
+    assert code == 1 and "2 alerts match" in err
     code, out, err = _hub(capsys, "trigger", "update", "Test", "--action", "a2", "--alert", "BBB")
     assert code == 0, err
-    assert fake.writes()[-1] == (
-        "PUT", "/api/v1/triggers/41", {"action": "a2", "alert_ids": [3]}
-    )  # fmt: skip
-    assert "cached pack fetched 2026-10-06" in out
+    assert fake.writes()[-1] == ("PUT", "/api/v1/triggers/41", {"action": "a2", "alert_ids": [3]})
+    (row,) = _rows(env)
+    assert json.loads(row["before"])["action"] == "a1"
+    assert json.loads(row["after"])["action"] == "a2" and row["ic_id"] == "41"
     assert _hub(capsys, "revert", "1")[0] == 0
     assert fake.writes()[-1][2] == {"action": "a1", "alert_ids": [3]}
-    code, _, err = _hub(capsys, "trigger", "retire", "Nope")
+    assert fake.triggers[0]["action"] == "a1"
+
+
+def test_trigger_revert_refuses_when_changed_since(env, fake, capsys):
+    fake.triggers = [fake._trigger(41, "Test ladder", "r1", "a1")]
+    _hub(capsys, "trigger", "update", "Test", "--action", "a2")
+    fake.triggers[0]["action"] = "edited in the app"
+    code, _, err = _hub(capsys, "revert", "1")
+    assert code == 1 and "changed since write #1" in err and "action" in err
+
+
+def test_trigger_retire_and_unknown_name(env, fake, capsys):
+    fake.triggers = [fake._trigger(41, "Test ladder", "r1", "a1")]
+    assert _hub(capsys, "trigger", "retire", "Test")[0] == 0
+    assert fake.writes()[-1][:2] == ("POST", "/api/v1/triggers/41/retire")
+    code, _, err = _hub(capsys, "trigger", "retire", "Nope", "--dry-run")
     assert code == 1 and "no trigger matches" in err
 
 
-def test_trigger_by_name_without_a_pack_says_how_to_fix(env, fake, capsys):
-    code, _, err = _hub(capsys, "trigger", "retire", "Test")
-    assert code == 1 and "hub ic pull" in err
+def test_trigger_by_id_reads_before_state(env, fake, capsys):
+    fake.triggers = [fake._trigger(41, "Test ladder", "r1", "a1")]
+    assert _hub(capsys, "trigger", "update", "--id", "41", "--tier", "red")[0] == 0
+    assert json.loads(_rows(env)[0]["before"])["tier"] is None
+    assert "no trigger with id 9" in _hub(capsys, "trigger", "retire", "--id", "9")[2]
+
+
+def test_unexpected_payload_shape_is_a_one_line_error(env, fake, capsys, monkeypatch):
+    real = fake._route
+
+    def route(method, path, body):
+        if path.endswith("/alerts") and method == "GET":
+            return _Resp({"data": [{"name": "x"}]})  # a row with no id
+        return real(method, path, body)
+
+    monkeypatch.setattr(fake, "_route", route)
+    code, _, err = _hub(capsys, "alert", "remove", "x", "--yes")
+    assert code == 1 and "unexpected IC response shape: missing 'id'" in err
+    assert len(err.strip().splitlines()) == 1
+
+
+# --- write status: pending, failed, unknown --------------------------------------------------
+
+
+def test_refused_write_is_logged_failed_and_not_revertible(env, fake, capsys, monkeypatch):
+    real = fake._route
+
+    def route(method, path, body):
+        if method == "POST" and path.endswith("/alerts"):
+            fake._err(422, "bad threshold")
+        return real(method, path, body)
+
+    monkeypatch.setattr(fake, "_route", route)
+    code, _, err = _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above",
+                        "--threshold", "30")  # fmt: skip
+    assert code == 1 and "bad threshold" in err
+    (row,) = _rows(env)
+    assert row["status"] == "failed" and "bad threshold" in row["error"]
+    assert row["after"] is None and fake.receipts == []
+    _, listing, _ = _hub(capsys, "writes")
+    assert "FAILED ADD_ALERT" in listing
+    code, _, err = _hub(capsys, "revert", "1", "--yes")
+    assert code == 1 and "only applied writes" in err
+
+
+@pytest.mark.parametrize("failure", ["http500", "timeout"])
+def test_ambiguous_failure_is_logged_unknown_with_a_warning(
+    env, fake, capsys, monkeypatch, failure
+):
+    real = fake._route
+
+    def route(method, path, body):
+        if method == "POST" and path.endswith("/alerts"):
+            if failure == "timeout":
+                raise TimeoutError
+            fake._err(502, "bad gateway")
+        return real(method, path, body)
+
+    monkeypatch.setattr(fake, "_route", route)
+    code, _, err = _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above",
+                        "--threshold", "30")  # fmt: skip
+    assert code == 1 and "check IC before retrying" in err and "unknown" in err
+    (row,) = _rows(env)
+    assert row["status"] == "unknown" and row["error"]
+    assert "only applied writes" in _hub(capsys, "revert", "1", "--yes")[2]
+
+
+def test_pending_row_exists_before_the_request_is_sent(env, fake, capsys, monkeypatch):
+    seen = []
+    real = fake._route
+
+    def route(method, path, body):
+        if method == "POST" and path.endswith("/alerts"):
+            seen.append([(r["status"], r["request"]) for r in _rows(env)])
+        return real(method, path, body)
+
+    monkeypatch.setattr(fake, "_route", route)
+    _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30")
+    assert len(seen[0]) == 1 and seen[0][0][0] == "pending"
+    assert json.loads(seen[0][0][1])["equity_symbol"] == "CCC"
+    assert _rows(env)[0]["status"] == "applied"
+
+
+# --- exact comparison and inputs ---------------------------------------------------------------
+
+
+def test_norm_coerces_only_numeric_keys():
+    assert ic_writes._norm("5.00", "threshold_value") == ic_writes._norm(5, "threshold_value")
+    assert ic_writes._norm("1.0", "name") != ic_writes._norm("1", "name")
+    assert ic_writes._norm("2026", "notes") != ic_writes._norm("2026.0", "notes")
+    zones = [{"tier": "1", "low": "48.0", "high": 50}]
+    assert ic_writes._norm(zones, "entry_zones") == [{"tier": "1", "low": "48", "high": "50"}]
+    assert ic_writes._norm([{"tier": "1.0"}], "z") != ic_writes._norm([{"tier": "1"}], "z")
+
+
+def test_revert_blocks_on_a_string_that_differs_only_numerically(env, fake, capsys):
+    _hub(capsys, "alert", "modify", "BBB", "--notes", "2026")
+    fake.alerts[2]["notes"] = "2026.0"
+    assert _hub(capsys, "revert", "1")[0] == 1
+
+
+def test_split_accepts_numeric_zero_forms(env, fake, capsys):
+    base = ("trade", "log", "AAA", "--type", "split", "--quantity", "4", "--yes")
+    assert _hub(capsys, *base, "--price", "0.0", "--fees", "0.00")[0] == 0
+    assert fake.writes()[-1][2]["price"] == 0
+    assert "split" in _hub(capsys, *base, "--price", "1")[2]
+
+
+def test_executed_at_is_always_utc_aware(env, fake, capsys):
+    base = ("trade", "log", "AAA", "--type", "buy", "--quantity", "1", "--price", "2", "--yes")
+    _hub(capsys, *base, "--executed-at", "2026-05-12T09:30:00")
+    _hub(capsys, *base, "--executed-at", "2026-05-12T09:30:00-04:00")
+    _hub(capsys, *base)
+    stamps = [c[2]["executed_at"] for c in fake.writes()]
+    assert stamps[0] == "2026-05-12T09:30:00.000Z"
+    assert stamps[1] == "2026-05-12T13:30:00.000Z"
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", stamps[2])
+
+
+def test_prices_travel_as_exact_decimal_strings(env, fake, capsys):
+    _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "below", "--threshold", "18.1")
+    assert fake.writes()[-1][2]["threshold_value"] == "18.1"
+    _hub(capsys, "alert", "add", "--symbol", "CCD", "--condition", "below", "--threshold", "20")
+    assert fake.writes()[-1][2]["threshold_value"] == 20
+
+
+def test_event_type_is_checked_against_ic_enum(env, fake, capsys):
+    with pytest.raises(SystemExit):
+        main(["ic", "event", "add", "--type", "nonsense", "--title", "T", "--date", "2026-10-15"])
+    assert (
+        _hub(capsys, "event", "add", "--type", "ipo", "--title", "T", "--date", "2026-10-15")[0]
+        == 0
+    )
 
 
 # --- listing and the ledger surface ---------------------------------------------------------

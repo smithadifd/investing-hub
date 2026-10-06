@@ -205,8 +205,25 @@ def _ic_writes_section(conn: sqlite3.Connection, now: datetime) -> list[str]:
     rows = ic_writes.recent_writes(conn, now)
     return _titled(
         f"recent IC writes (last {ic_writes.RECENT_HOURS}h)",
-        [f"#{r['id']} ({r['at']}) {r['action']} {r['target']}" for r in rows],
+        [
+            f"#{r['id']} ({r['at']}) {r['action']} {r['target']}"
+            + ("" if r["status"] == "applied" else f" [{r['status']}]")
+            for r in rows
+        ],
     )
+
+
+def _legacy_handoffs_section(conn: sqlite3.Connection) -> list[str]:
+    """Rows left in the retired ``handoffs`` table must not vanish silently."""
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM handoffs WHERE status IN ('draft', 'approved')"
+        ).fetchone()[0]
+    except sqlite3.Error:
+        return []
+    if not n:
+        return []
+    return [f"WARN {n} legacy handoffs unapplied (handoffs retired; apply or ignore)"]
 
 
 def _stale_section(conn: sqlite3.Connection, now: datetime, stale_days: int) -> list[str]:
@@ -305,6 +322,7 @@ def _store_sections(conn: sqlite3.Connection, now: datetime, days: int) -> list[
     for name, section in (
         ("briefs", lambda: _briefs_section(conn)),
         ("ic_writes", lambda: _ic_writes_section(conn, now)),
+        ("handoffs", lambda: _legacy_handoffs_section(conn)),
         ("documents", lambda: _stale_section(conn, now, days)),
     ):
         try:

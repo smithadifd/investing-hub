@@ -77,14 +77,25 @@ def iso_ms(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
-def _num(text: str, flag: str) -> int | float:
+def _num(text: str, flag: str) -> int | str:
+    """An exact number for the request body: an int, else the decimal as a string.
+
+    IC's money and price fields are Decimal and accept strings, so ``18.1`` is never
+    rounded through a binary float on its way out.
+    """
     try:
         value = Decimal(text.strip())
     except InvalidOperation:
         raise WriteError(f"{flag} must be a number (got {text!r})") from None
     if not value.is_finite():
         raise WriteError(f"{flag} must be a finite number (got {text!r})")
-    return int(value) if value == value.to_integral_value() and "." not in text else float(value)
+    if value == value.to_integral_value() and "." not in text and "e" not in text.lower():
+        return int(value)
+    return format(value, "f")
+
+
+def _is_zero(text: str | None, flag: str) -> bool:
+    return text is not None and Decimal(str(_num(text, flag))) == 0
 
 
 def parse_zone(text: str) -> dict:
@@ -96,7 +107,7 @@ def parse_zone(text: str) -> dict:
     high = _num(parts[2], "--entry-zone high") if parts[2].strip() else None
     if low is None and high is None:
         raise WriteError(f"--entry-zone {text!r} needs at least one bound")
-    if low is not None and high is not None and low >= high:
+    if low is not None and high is not None and Decimal(str(low)) >= Decimal(str(high)):
         raise WriteError(f"--entry-zone {text!r}: low must be less than high")
     return {"tier": parts[0].strip(), "low": low, "high": high}
 
@@ -125,27 +136,35 @@ def _load(text: str | None) -> Any:
     return None if text is None else json.loads(text)
 
 
-def _norm(value: Any) -> Any:
-    """Compare-friendly form: numbers and numeric strings by value, containers recursively."""
-    if isinstance(value, bool) or value is None:
-        return value
-    if isinstance(value, int | float | Decimal):
-        return format(Decimal(str(value)).normalize(), "f")
-    if isinstance(value, str):
+NUMERIC_KEYS = frozenset(
+    {"threshold_value", "target_price", "low", "high", "quantity", "price", "fees"}
+)
+
+
+def _norm(value: Any, key: str | None = None) -> Any:
+    """Compare-friendly form. Numbers are compared by value only under ``NUMERIC_KEYS``
+    ("5.00" equals 5); every other string, number and boolean is compared exactly."""
+    if isinstance(value, list):
+        return [_norm(v, key) for v in value]
+    if isinstance(value, dict):
+        return {k: _norm(v, k) for k, v in value.items()}
+    if key in NUMERIC_KEYS and isinstance(value, int | float | Decimal | str):
+        if isinstance(value, bool):
+            return value
         try:
-            return format(Decimal(value).normalize(), "f")
+            return format(Decimal(str(value)).normalize(), "f")
         except InvalidOperation:
             return value
-    if isinstance(value, list):
-        return [_norm(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _norm(v) for k, v in value.items()}
     return value
 
 
 def differing(live: dict, expected: dict, keys: list[str]) -> list[str]:
     """Keys (present on both sides) whose values differ between ``live`` and ``expected``."""
-    return [k for k in keys if k in live and k in expected and _norm(live[k]) != _norm(expected[k])]
+    return [
+        k
+        for k in keys
+        if k in live and k in expected and _norm(live[k], k) != _norm(expected[k], k)
+    ]
 
 
 # --- reading state --------------------------------------------------------------------------
@@ -155,10 +174,15 @@ def resource_of(path: str) -> str:
     rest = path.removeprefix(API).strip("/").split("/")
     if rest[0] == "watchlists" and len(rest) >= 3 and rest[2] == "items":
         return "item"
-    return {"alerts": "alert", "watchlists": "watchlist", "events": "event"}.get(rest[0], rest[0])
+    return {
+        "alerts": "alert",
+        "watchlists": "watchlist",
+        "events": "event",
+        "triggers": "trigger",
+    }.get(rest[0], rest[0])
 
 
-READABLE = ("alert", "item")  # resources the advisor token can GET one of
+READABLE = ("alert", "item", "trigger")  # resources the advisor token can GET one of
 
 
 def read_state(client: ic.IcClient, resource: str, ic_id: str | None) -> dict | None:
@@ -167,6 +191,8 @@ def read_state(client: ic.IcClient, resource: str, ic_id: str | None) -> dict | 
         return None
     if resource == "alert":
         return next((a for a in client.alerts() if str(a.get("id")) == ic_id), None)
+    if resource == "trigger":
+        return next((t for t in client.triggers() if str(t.get("id")) == ic_id), None)
     if resource == "item":
         wid, _, iid = ic_id.partition(":")
         return next(
@@ -201,10 +227,11 @@ def open_log(db: Path) -> sqlite3.Connection:
     return conn
 
 
-def _insert(conn: sqlite3.Connection, plan: Plan, **cols: Any) -> int:
+def _insert_pending(conn: sqlite3.Connection, plan: Plan, source_ref: str | None) -> int:
+    """Record the intent before anything is sent, so a crash mid-send leaves a trace."""
     cur = conn.execute(
-        "INSERT INTO ic_writes (at, action, target, method, path, request, before, after, ic_id,"
-        " source_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO ic_writes (at, action, target, method, path, request, before, ic_id,"
+        " source_ref, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
         (
             iso_ms(datetime.now(UTC)),
             plan.action,
@@ -213,9 +240,8 @@ def _insert(conn: sqlite3.Connection, plan: Plan, **cols: Any) -> int:
             plan.path,
             _json(plan.body),
             _json(plan.before),
-            _json(cols.get("after")),
-            cols.get("ic_id"),
-            cols.get("source_ref"),
+            plan.ic_id,
+            source_ref,
         ),
     )
     assert cur.lastrowid is not None
@@ -229,7 +255,9 @@ def list_writes(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
 def recent_writes(conn: sqlite3.Connection, now: datetime) -> list[sqlite3.Row]:
     cutoff = iso_ms(now - timedelta(hours=RECENT_HOURS))
     return conn.execute(
-        "SELECT id, at, action, target FROM ic_writes WHERE at >= ? ORDER BY id", (cutoff,)
+        "SELECT id, at, action, target, status FROM ic_writes"
+        " WHERE at >= ? AND status != 'failed' ORDER BY id",
+        (cutoff,),
     ).fetchall()
 
 
@@ -243,7 +271,10 @@ def format_write(row: sqlite3.Row) -> str:
     )
     tail = f" (reverted by #{row['reverted_by']})" if row["reverted_by"] else ""
     ic_id = f" ic_id={row['ic_id']}" if row["ic_id"] else ""
-    return f"#{row['id']} {row['at']} {row['action']} {row['target']}{ic_id} [{receipt}]{tail}"
+    return (
+        f"#{row['id']} {row['at']} {row['status'].upper()} {row['action']} {row['target']}"
+        f"{ic_id} [{receipt}]{tail}"
+    )
 
 
 # --- applying -------------------------------------------------------------------------------
@@ -281,6 +312,8 @@ def run(
         return execute(name, args, client, plan)
     except (ic.IcError, WriteError) as exc:
         return _fail(name, str(exc))
+    except KeyError as exc:
+        return _fail(name, f"unexpected IC response shape: missing {exc}")
 
 
 def execute(name: str, args: Any, client: ic.IcClient, plan: Plan) -> int:
@@ -292,7 +325,7 @@ def execute(name: str, args: Any, client: ic.IcClient, plan: Plan) -> int:
             f"{plan.action} {plan.needs_yes} and needs --yes; confirm with the operator in chat"
             " first, then re-run with --yes (use --dry-run to see the request)"
         )
-    conn = open_log(args.db)  # before any write: an unlogged write must never happen
+    conn = open_log(args.db)  # a pending row is written before the send; no log, no write
     try:
         return _apply(name, conn, client, plan, args.source_ref, args.summary)
     finally:
@@ -307,20 +340,45 @@ def _apply(
     source_ref: str | None,
     summary: str | None,
 ) -> int:
-    reply = client.call(plan.method, plan.path, plan.body)  # IcError here: nothing was written
+    write_id = _insert_pending(conn, plan, source_ref)  # intent first, outcome after
+    try:
+        reply = client.call(plan.method, plan.path, plan.body)
+    except ic.IcError as exc:
+        # An HTTP status below 500 means IC refused the request: nothing was applied. A
+        # timeout, a dropped connection or a 5xx may still have been applied: status unknown.
+        refused = exc.status is not None and exc.status < 500
+        status = "failed" if refused else "unknown"
+        message = ic.redact(str(exc))
+        conn.execute(
+            "UPDATE ic_writes SET status = ?, error = ? WHERE id = ?", (status, message, write_id)
+        )
+        if status == "unknown":
+            print(
+                f"hub ic {name}: WARN {message}; IC may or may not have applied this change:"
+                f" check IC before retrying (ic_writes #{write_id} is marked unknown)",
+                file=sys.stderr,
+            )
+            return 1
+        raise
     ic_id = _derive_ic_id(plan, reply)
     after = _read_after(client, plan, ic_id, reply)
     try:
-        write_id = _insert(conn, plan, after=after, ic_id=ic_id, source_ref=source_ref)
+        conn.execute(
+            "UPDATE ic_writes SET status = 'applied', after = ?, ic_id = ? WHERE id = ?",
+            (_json(after), ic_id, write_id),
+        )
+        if plan.reverts is not None:
+            conn.execute(
+                "UPDATE ic_writes SET reverted_by = ? WHERE id = ?", (write_id, plan.reverts)
+            )
     except sqlite3.Error as exc:
         print(
-            f"hub ic {name}: WARN the write WAS applied in IC but could not be logged ({exc});"
-            f" record it by hand: {plan.method} {plan.path} {_json(plan.body)} -> {_json(after)}",
+            f"hub ic {name}: WARN the write WAS applied in IC but ic_writes #{write_id} could not"
+            f" be updated ({exc}); it stays 'pending'. Record it by hand: {plan.method}"
+            f" {plan.path} {_json(plan.body)} -> {_json(after)}",
             file=sys.stderr,
         )
         return 1
-    if plan.reverts is not None:
-        conn.execute("UPDATE ic_writes SET reverted_by = ? WHERE id = ?", (write_id, plan.reverts))
     receipt_id, receipt_error = post_receipt(client, plan, ic_id, summary)
     conn.execute(
         "UPDATE ic_writes SET receipt_id = ?, receipt_error = ? WHERE id = ?",
@@ -604,9 +662,9 @@ def plan_trade_log(client: ic.IcClient, a: Any) -> Plan:
         "quantity": _num(a.quantity, "--quantity"),
     }
     if a.type == "split":
-        if a.account or a.fees not in (None, "0"):
+        if a.account or (a.fees is not None and not _is_zero(a.fees, "--fees")):
             raise WriteError("a split carries no account and no fees")
-        if a.price not in (None, "0"):
+        if a.price is not None and not _is_zero(a.price, "--price"):
             raise WriteError("a split's price must be 0 (quantity is the ratio)")
         body["price"] = 0
     else:
@@ -627,13 +685,19 @@ def plan_trade_log(client: ic.IcClient, a: Any) -> Plan:
 
 
 def _executed_at(text: str | None) -> str:
+    """UTC timestamp for IC. A bare date means noon UTC that day (so it shows as that date in
+    any US zone); a datetime without an offset is read as UTC."""
     if text is None:
         return iso_ms(datetime.now(UTC))
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         raise WriteError(f"--executed-at must be an ISO date or datetime (got {text!r})") from None
-    return parsed.isoformat() if "T" in text or " " in text else f"{text}T00:00:00"
+    if "T" not in text and " " not in text:
+        parsed = parsed.replace(hour=12)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return iso_ms(parsed)
 
 
 def plan_ratio_add(client: ic.IcClient, a: Any) -> Plan:
@@ -660,39 +724,24 @@ def plan_lesson_add(client: ic.IcClient, a: Any) -> Plan:
 
 
 # --- planners: triggers ---------------------------------------------------------------------
-# The advisor token cannot list or read triggers, so a trigger is found by name in the cached
-# context pack (`hub ic pull`), or addressed by --id. Before-state comes from the same pack row.
+# Triggers are found by name through GET /triggers; before and after state come from
+# GET /triggers/{id} (both are on the advisor:write allow-list).
 
 
-def _pack_triggers() -> tuple[list[dict], str]:
-    try:
-        pack = json.loads((ic.PACK_DIR / ic.PACK_FILE).read_text(encoding="utf-8"))
-        meta = json.loads((ic.PACK_DIR / ic.META_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise WriteError(
-            "no cached context pack to look the trigger up in (run `hub ic pull`, or pass --id)"
-        ) from None
-    rows = pack.get("triggers") if isinstance(pack, dict) else None
-    if not isinstance(rows, list):
-        raise WriteError("the cached pack has no triggers list (run `hub ic pull`, or pass --id)")
-    return [r for r in rows if isinstance(r, dict)], str(meta.get("fetched_at"))
-
-
-def _find_trigger(a: Any) -> tuple[str, str, dict | None, list[str]]:
-    """``(id, label, pack row or None, notes)`` for ``a.name`` or ``a.id``."""
+def _find_trigger(client: ic.IcClient, a: Any) -> tuple[str, str, dict]:
+    """``(id, label, live trigger row)`` for ``a.name`` or ``a.id``."""
     if a.id is not None:
         trigger_id = _id(a.id)
-        return trigger_id, f"trigger {trigger_id}", None, [NO_TRIGGER_BEFORE]
+        row = read_state(client, "trigger", trigger_id)
+        if row is None:
+            raise WriteError(f"no trigger with id {trigger_id}")
+        return trigger_id, str(row.get("name", f"trigger {trigger_id}")), row
     if not a.name:
         raise WriteError("give a trigger NAME or --id")
-    rows, fetched = _pack_triggers()
+    rows = client.triggers()
     live = [r for r in rows if r.get("status") in (None, "active")] or rows
     row = ic.resolve_name(live, a.name, "trigger")
-    note = f"before-state is from the cached pack fetched {fetched}"
-    return str(row["id"]), str(row["name"]), row, [note]
-
-
-NO_TRIGGER_BEFORE = "IC's advisor token has no trigger read route: no before-state is captured"
+    return str(row["id"]), str(row["name"]), row
 
 
 def plan_trigger_add(client: ic.IcClient, a: Any) -> Plan:
@@ -724,7 +773,7 @@ def plan_trigger_update(client: ic.IcClient, a: Any) -> Plan:
         body["alert_ids"] = []
     if not body:
         raise WriteError("nothing to change: pass at least one field flag")
-    trigger_id, label, row, notes = _find_trigger(a)
+    trigger_id, label, row = _find_trigger(client, a)
     return Plan(
         "UPDATE_TRIGGER",
         label,
@@ -733,12 +782,11 @@ def plan_trigger_update(client: ic.IcClient, a: Any) -> Plan:
         body,
         before=row,
         ic_id=trigger_id,
-        notes=notes,
     )
 
 
 def plan_trigger_retire(client: ic.IcClient, a: Any) -> Plan:
-    trigger_id, label, row, notes = _find_trigger(a)
+    trigger_id, label, row = _find_trigger(client, a)
     return Plan(
         "RETIRE_TRIGGER",
         label,
@@ -746,7 +794,7 @@ def plan_trigger_retire(client: ic.IcClient, a: Any) -> Plan:
         f"{API}/triggers/{trigger_id}/retire",
         before=row,
         ic_id=trigger_id,
-        notes=[*notes, "retiring is terminal and does not silence the trigger's linked alerts"],
+        notes=["retiring is terminal and does not silence the trigger's linked alerts"],
     )
 
 
@@ -788,10 +836,19 @@ def _later_writes(conn: sqlite3.Connection, row: sqlite3.Row) -> list[int]:
     resource = resource_of(row["path"])
     rows = conn.execute(
         "SELECT id, path FROM ic_writes WHERE id > ? AND ic_id = ? AND reverted_by IS NULL"
+        " AND status != 'failed'"
         " AND action NOT LIKE 'REVERT\\_%' ESCAPE '\\'",
         (row["id"], row["ic_id"]),
     ).fetchall()
     return [r["id"] for r in rows if resource_of(r["path"]) == resource]
+
+
+def _with_alert_ids(state: dict) -> dict:
+    """A trigger row carries ``alerts`` (summaries); requests carry ``alert_ids``."""
+    if "alerts" in state and "alert_ids" not in state:
+        ids = sorted(a.get("id") for a in state["alerts"] or [])
+        return {**state, "alert_ids": ids}
+    return state
 
 
 def _check_live(
@@ -818,7 +875,7 @@ def _check_live(
     if live is None:
         raise WriteError(f"{what} no longer exists in IC; nothing to revert")
     expected = _load(row["after"]) or _load(row["request"]) or {}
-    changed = differing(live, expected, keys)
+    changed = differing(_with_alert_ids(live), _with_alert_ids(expected), keys)
     if changed:
         raise WriteError(
             f"{what} was changed since write #{row['id']} (differs on: {', '.join(changed)});"
@@ -833,6 +890,10 @@ def plan_revert(conn: sqlite3.Connection, client: ic.IcClient, write_id: int) ->
         raise WriteError(f"no ic_writes row #{write_id}")
     if row["action"].startswith("REVERT_"):
         raise WriteError(f"write #{write_id} is itself a revert; make the change again instead")
+    if row["status"] != "applied":
+        raise WriteError(
+            f"write #{write_id} has status {row['status']!r}; only applied writes can be reverted"
+        )
     if row["reverted_by"]:
         raise WriteError(f"write #{write_id} was already reverted by #{row['reverted_by']}")
     match = _SEG.match(row["path"])
@@ -926,6 +987,8 @@ def run_revert(args: Any, *, client: ic.IcClient | None = None) -> int:
         return execute(name, args, client, plan)
     except (ic.IcError, WriteError) as exc:
         return _fail(name, str(exc))
+    except KeyError as exc:
+        return _fail(name, f"unexpected IC response shape: missing {exc}")
 
 
 def run_writes(args: Any) -> int:

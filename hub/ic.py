@@ -46,7 +46,12 @@ _META_KEYS = ("generated_at", "schema_version", "advisor_actions_version")
 
 
 class IcError(Exception):
-    """A failure talking to IC. The message is one line and already redacted."""
+    """A failure talking to IC. The message is one line and already redacted.
+
+    ``status`` is the HTTP status when IC answered, else None (no answer: timeout, refused).
+    """
+
+    status: int | None = None
 
 
 def _clean_errors[**P, R](func: Callable[P, R]) -> Callable[P, R]:
@@ -198,7 +203,9 @@ def _request(
     except urllib.error.HTTPError as exc:
         line = _http_error_line(exc.code, path)
         detail = _error_detail(exc) if for_write else ""
-        raise IcError(f"{line}: {detail}" if detail else line) from None
+        error = IcError(f"{line}: {detail}" if detail else line)
+        error.status = exc.code
+        raise error from None
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise IcError(_timeout_line(base_url, timeout)) from None
@@ -343,13 +350,16 @@ def request_json(
     """Send ``method path`` (optional JSON body) and return the decoded JSON, or None for an
     empty reply. Errors leave as one redacted line carrying IC's validation detail."""
     timeout = TIMEOUT_SECONDS if timeout is None else timeout
+    status = None
     try:
         return _request(base_url, method.upper(), path, token, timeout, payload, for_write=True)
     except IcError as exc:
-        message = redact(str(exc), token)
+        message, status = redact(str(exc), token), exc.status
     except Exception as exc:
         message = redact(f"IC request failed: {type(exc).__name__}: {exc}", token)
-    raise IcError(message) from None
+    error = IcError(message)
+    error.status = status
+    raise error from None
 
 
 # --- advisor write client -------------------------------------------------------------------
@@ -397,6 +407,9 @@ class IcClient:
         if not isinstance(data, dict):
             raise IcError("IC returned an unexpected watchlist payload")
         return data
+
+    def triggers(self) -> list[dict]:
+        return _as_list(self.call("GET", f"{API}/triggers"), "triggers")
 
     def accounts(self) -> list[dict]:
         return _as_list(self.call("GET", f"{API}/accounts"), "accounts")
