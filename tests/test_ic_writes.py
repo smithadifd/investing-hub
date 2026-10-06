@@ -322,8 +322,8 @@ def test_zone_parsing():
 
 def test_dry_run_renders_request_and_sends_nothing(env, fake, capsys):
     code, out, _ = _hub(
-        capsys, "alert", "add", "--symbol", "ccc", "--condition", "below", "--threshold", "18.5",
-        "--notes", "tier one", "--dry-run",
+        capsys, "alert", "add", "--yes", "--symbol", "ccc", "--condition", "below",
+        "--threshold", "18.5", "--notes", "tier one", "--dry-run",
     )  # fmt: skip
     assert code == 0
     assert "dry-run: ADD_ALERT CCC" in out
@@ -359,8 +359,8 @@ def test_dry_run_resolves_names_with_reads_only(env, fake, capsys):
 
 def test_alert_add_logs_row_and_posts_receipt(env, fake, capsys):
     code, out, err = _hub(
-        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30",
-        "--source-ref", "session-1", "--summary", "carry tier",
+        capsys, "alert", "add", "--yes", "--symbol", "CCC", "--condition", "above",
+        "--threshold", "30", "--source-ref", "session-1", "--summary", "carry tier",
     )  # fmt: skip
     assert code == 0, err
     assert "applied ADD_ALERT CCC" in out and "receipt 901" in out
@@ -383,7 +383,16 @@ def test_alert_add_logs_row_and_posts_receipt(env, fake, capsys):
 def test_receipt_failure_does_not_undo_the_write_and_is_recorded(env, fake, capsys):
     fake.fail_receipts = True
     code, out, err = _hub(
-        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
     )
     assert code == 0
     assert "applied ADD_ALERT" in out
@@ -398,7 +407,17 @@ def test_receipt_failure_does_not_undo_the_write_and_is_recorded(env, fake, caps
 
 def test_modify_records_before_and_after(env, fake, capsys):
     code, _, err = _hub(
-        capsys, "alert", "modify", "BBB", "--threshold", "4.5", "--cooldown", "120", "--notes", "n"
+        capsys,
+        "alert",
+        "modify",
+        "BBB",
+        "--yes",
+        "--threshold",
+        "4.5",
+        "--cooldown",
+        "120",
+        "--notes",
+        "n",
     )
     assert code == 0, err
     (row,) = _rows(env)
@@ -426,7 +445,7 @@ def test_append_thesis_appends_to_the_current_thesis(env, fake, capsys):
 
 def test_entry_zones_and_clear_flags(env, fake, capsys):
     code, _, err = _hub(
-        capsys, "watchlist", "update-item", "BBB", "--entry-zone", "starter:48:50",
+        capsys, "watchlist", "update-item", "BBB", "--yes", "--entry-zone", "starter:48:50",
         "--entry-zone", "deep::46", "--clear", "notes", "--catalyst-tag", "Uranium Restart",
     )  # fmt: skip
     assert code == 0, err
@@ -449,7 +468,7 @@ def test_thesis_and_append_thesis_conflict(env, fake, capsys):
 def test_watchlist_add_item_create_and_trade_event_trigger_lesson_ratio(env, fake, capsys):
     fake_calls = fake.calls
     steps = [
-        ("watchlist", "add-item", "ddd", "--watchlist", "Theme One", "--thesis", "t",
+        ("watchlist", "add-item", "--yes", "ddd", "--watchlist", "Theme One", "--thesis", "t",
          "--target-price", "12.5", "--no-track-calendar"),
         ("watchlist", "create", "New List", "--description", "d"),
         ("event", "add", "--title", "Test event", "--date", "2026-10-15", "--importance", "high"),
@@ -494,7 +513,16 @@ def test_ic_validation_error_detail_is_shown_and_logged_failed(env, fake, capsys
 
     monkeypatch.setattr(fake, "_route", route)
     code, _, err = _hub(
-        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
     )
     assert code == 1
     assert "threshold_value: must be positive" in err
@@ -533,11 +561,11 @@ def test_alert_remove_requires_yes(env, fake, capsys):
     assert [a["id"] for a in fake.alerts] == [1, 2]
 
 
-def test_deactivating_an_alert_requires_yes_but_other_edits_do_not(env, fake, capsys):
+def test_deactivating_an_alert_requires_yes_but_non_level_edits_do_not(env, fake, capsys):
     code, _, err = _hub(capsys, "alert", "modify", "BBB", "--inactive")
     assert code == 1 and "deactivates an alert" in err
     assert fake.alerts[2]["is_active"] is True
-    assert _hub(capsys, "alert", "modify", "BBB", "--threshold", "6")[0] == 0
+    assert _hub(capsys, "alert", "modify", "--yes", "BBB", "--threshold", "6")[0] == 0
     assert _hub(capsys, "alert", "modify", "BBB", "--active")[0] == 0
     assert _hub(capsys, "alert", "modify", "BBB", "--inactive", "--yes")[0] == 0
     assert fake.alerts[2]["is_active"] is False
@@ -564,7 +592,18 @@ def test_trade_shape_checks(env, fake, capsys):
 
 
 def test_revert_create_deletes_and_is_logged(env, fake, capsys):
-    _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30")
+    _hub(
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
+    )
     code, _, err = _hub(capsys, "revert", "1")
     assert code == 1 and "needs --yes" in err  # a revert that removes an alert is gated too
     code, out, err = _hub(capsys, "revert", "1", "--yes")
@@ -585,8 +624,10 @@ def test_revert_create_deletes_and_is_logged(env, fake, capsys):
 
 
 def test_revert_modify_puts_the_recorded_before_values(env, fake, capsys):
-    _hub(capsys, "alert", "modify", "BBB", "--threshold", "4.5", "--notes", "n")
+    _hub(capsys, "alert", "modify", "--yes", "BBB", "--threshold", "4.5", "--notes", "n")
     code, _, err = _hub(capsys, "revert", "1")
+    assert code == 1 and "sets or changes a level" in err  # restoring a level is a level change
+    code, _, err = _hub(capsys, "revert", "1", "--yes")
     assert code == 0, err
     assert fake.alerts[2]["threshold_value"] == "5.00" and fake.alerts[2]["notes"] is None
     method, path, body = fake.writes()[-1]
@@ -595,7 +636,7 @@ def test_revert_modify_puts_the_recorded_before_values(env, fake, capsys):
 
 
 def test_revert_modify_refuses_when_live_state_changed(env, fake, capsys):
-    _hub(capsys, "alert", "modify", "BBB", "--threshold", "4.5")
+    _hub(capsys, "alert", "modify", "--yes", "BBB", "--threshold", "4.5")
     fake.alerts[2]["threshold_value"] = "9.00"  # someone edited it in IC meanwhile
     before = len(fake.writes())
     code, _, err = _hub(capsys, "revert", "1")
@@ -606,13 +647,24 @@ def test_revert_modify_refuses_when_live_state_changed(env, fake, capsys):
 
 
 def test_revert_unchanged_fields_do_not_block_on_numeric_formatting(env, fake, capsys):
-    _hub(capsys, "alert", "modify", "BBB", "--threshold", "4.5")
+    _hub(capsys, "alert", "modify", "--yes", "BBB", "--threshold", "4.5")
     fake.alerts[2]["threshold_value"] = "4.50"  # same number, different text
-    assert _hub(capsys, "revert", "1")[0] == 0
+    assert _hub(capsys, "revert", "1", "--yes")[0] == 0
 
 
 def test_revert_create_refuses_when_live_state_changed(env, fake, capsys):
-    _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30")
+    _hub(
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
+    )
     fake.alerts[-1]["name"] = "renamed elsewhere"
     code, _, err = _hub(capsys, "revert", "1", "--yes")
     assert code == 1 and "changed since" in err and "name" in err
@@ -622,7 +674,7 @@ def test_revert_create_refuses_when_live_state_changed(env, fake, capsys):
 def test_revert_remove_recreates_the_alert_from_before_state(env, fake, capsys):
     _hub(capsys, "alert", "remove", "BBB", "--yes")
     assert [a["name"] for a in fake.alerts] == ["AAA below 10", "AAA above 20"]
-    code, out, err = _hub(capsys, "revert", "1")
+    code, out, err = _hub(capsys, "revert", "1", "--yes")
     assert code == 0, err
     method, path, body = fake.writes()[-1]
     assert (method, path) == ("POST", "/api/v1/alerts")
@@ -687,7 +739,7 @@ def test_revert_unknown_id(env, fake, capsys):
 
 
 def test_revert_dry_run_sends_nothing(env, fake, capsys):
-    _hub(capsys, "alert", "modify", "BBB", "--threshold", "4.5")
+    _hub(capsys, "alert", "modify", "--yes", "BBB", "--threshold", "4.5")
     before = len(fake.writes())
     code, out, _ = _hub(capsys, "revert", "1", "--dry-run")
     assert code == 0 and "dry-run: REVERT_MODIFY_ALERT" in out
@@ -762,7 +814,7 @@ def test_refused_write_is_logged_failed_and_not_revertible(env, fake, capsys, mo
         return real(method, path, body)
 
     monkeypatch.setattr(fake, "_route", route)
-    code, _, err = _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above",
+    code, _, err = _hub(capsys, "alert", "add", "--yes", "--symbol", "CCC", "--condition", "above",
                         "--threshold", "30")  # fmt: skip
     assert code == 1 and "bad threshold" in err
     (row,) = _rows(env)
@@ -788,7 +840,7 @@ def test_ambiguous_failure_is_logged_unknown_with_a_warning(
         return real(method, path, body)
 
     monkeypatch.setattr(fake, "_route", route)
-    code, _, err = _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above",
+    code, _, err = _hub(capsys, "alert", "add", "--yes", "--symbol", "CCC", "--condition", "above",
                         "--threshold", "30")  # fmt: skip
     assert code == 1 and "check IC before retrying" in err and "unknown" in err
     (row,) = _rows(env)
@@ -806,7 +858,18 @@ def test_pending_row_exists_before_the_request_is_sent(env, fake, capsys, monkey
         return real(method, path, body)
 
     monkeypatch.setattr(fake, "_route", route)
-    _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30")
+    _hub(
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
+    )
     assert len(seen[0]) == 1 and seen[0][0][0] == "pending"
     assert json.loads(seen[0][0][1])["equity_symbol"] == "CCC"
     assert _rows(env)[0]["status"] == "applied"
@@ -849,9 +912,31 @@ def test_executed_at_is_always_utc_aware(env, fake, capsys):
 
 
 def test_prices_travel_as_exact_decimal_strings(env, fake, capsys):
-    _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "below", "--threshold", "18.1")
+    _hub(
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "below",
+        "--threshold",
+        "18.1",
+    )
     assert fake.writes()[-1][2]["threshold_value"] == "18.1"
-    _hub(capsys, "alert", "add", "--symbol", "CCD", "--condition", "below", "--threshold", "20")
+    _hub(
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCD",
+        "--condition",
+        "below",
+        "--threshold",
+        "20",
+    )
     assert fake.writes()[-1][2]["threshold_value"] == 20
 
 
@@ -881,7 +966,18 @@ def test_writes_on_an_empty_log(env, fake, capsys):
 
 
 def test_token_never_appears_in_the_log(env, fake, capsys):
-    _hub(capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30")
+    _hub(
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
+    )
     dump = json.dumps([dict(r) for r in _rows(env)])
     assert TOKEN not in dump
 
@@ -897,7 +993,16 @@ def test_keyerror_after_a_successful_send_leaves_an_applied_row_and_warns(
 
     monkeypatch.setattr(ic_writes, "_read_after", boom)
     code, _, err = _hub(
-        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
     )
     assert code == 1 and "WAS applied in IC" in err and "KeyError" in err
     (row,) = _rows(env)
@@ -913,7 +1018,20 @@ def test_keyboard_interrupt_after_send_keeps_the_row_applied_and_propagates(
 
     monkeypatch.setattr(ic_writes, "_read_after", interrupt)
     with pytest.raises(KeyboardInterrupt):
-        main(["ic", "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"])
+        main(
+            [
+                "ic",
+                "alert",
+                "add",
+                "--yes",
+                "--symbol",
+                "CCC",
+                "--condition",
+                "above",
+                "--threshold",
+                "30",
+            ]
+        )
     assert "WAS applied in IC" in capsys.readouterr().err
     (row,) = _rows(env)
     assert row["status"] == "applied"
@@ -928,7 +1046,16 @@ def test_receipt_row_update_failure_is_a_warning(env, fake, capsys, monkeypatch)
     conn.commit()
     conn.close()
     code, out, err = _hub(
-        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
     )
     assert code == 0 and "receipt result could not be recorded" in err
     assert _rows(env)[0]["status"] == "applied"
@@ -959,7 +1086,16 @@ def _refuse(fake, monkeypatch, exc):
 def test_send_failure_classification(env, fake, capsys, monkeypatch, exc, status):
     _refuse(fake, monkeypatch, exc)
     code, _, err = _hub(
-        capsys, "alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"
+        capsys,
+        "alert",
+        "add",
+        "--yes",
+        "--symbol",
+        "CCC",
+        "--condition",
+        "above",
+        "--threshold",
+        "30",
     )
     assert code == 1
     assert _rows(env)[0]["status"] == status
@@ -1001,3 +1137,23 @@ def test_trigger_by_name_falls_back_to_retired_and_id_reads_retired(env, fake, c
     assert ("GET", "/api/v1/triggers/42", None) in fake.calls
     code, _, err = _hub(capsys, "trigger", "update", "Nothing", "--tier", "x", "--dry-run")
     assert code == 1 and "no trigger matches" in err
+
+
+def test_level_changes_require_yes(env, fake, capsys):
+    gated = [
+        ("alert", "add", "--symbol", "CCC", "--condition", "above", "--threshold", "30"),
+        ("alert", "modify", "BBB", "--threshold", "6"),
+        ("watchlist", "update-item", "BBB", "--target-price", "12"),
+        ("watchlist", "update-item", "BBB", "--entry-zone", "starter:40:45"),
+        ("watchlist", "update-item", "BBB", "--clear", "entry_zones"),
+        ("watchlist", "add-item", "ddd", "--watchlist", "Theme One", "--target-price", "9"),
+    ]
+    for step in gated:
+        code, _, err = _hub(capsys, *step)
+        assert code == 1 and "sets or changes a level" in err, step
+    assert fake.writes() == []
+
+
+def test_non_level_edits_apply_without_yes(env, fake, capsys):
+    assert _hub(capsys, "alert", "modify", "BBB", "--notes", "n", "--cooldown", "30")[0] == 0
+    assert _hub(capsys, "watchlist", "update-item", "BBB", "--append-thesis", "more")[0] == 0

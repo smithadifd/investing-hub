@@ -78,11 +78,18 @@ def _alert_fields(p: argparse.ArgumentParser, *, condition_required: bool = Fals
     p.add_argument("--notes")
 
 
-YES_ALERT = "required when this deactivates (--inactive) or removes an alert"
+YES_ALERT = (
+    "required when this sets or changes a threshold, or deactivates (--inactive) or removes an"
+    " alert (confirm with the operator in chat first)"
+)
+YES_LEVEL = (
+    "required when this sets, changes or clears a target price or entry zones (confirm with the"
+    " operator in chat first)"
+)
 
 
 def _alert_add_args(p: argparse.ArgumentParser) -> None:
-    _common(p)
+    _common(p, yes_help=YES_ALERT)
     p.add_argument("--symbol", help="equity target")
     p.add_argument("--ratio-id", type=int, help="ratio target (id from `ratio add`)")
     p.add_argument("--entry-zone-item", metavar="SYMBOL", help="watchlist item, for entry_zone")
@@ -121,7 +128,7 @@ def _item_fields(p: argparse.ArgumentParser) -> None:
 
 
 def _watchlist_add_item_args(p: argparse.ArgumentParser) -> None:
-    _common(p)
+    _common(p, yes_help=YES_LEVEL)
     p.add_argument("symbol")
     p.add_argument("--watchlist", required=True, help="watchlist name: exact, else unique prefix")
     p.add_argument("--thesis")
@@ -129,7 +136,7 @@ def _watchlist_add_item_args(p: argparse.ArgumentParser) -> None:
 
 
 def _watchlist_update_item_args(p: argparse.ArgumentParser) -> None:
-    _common(p)
+    _common(p, yes_help=YES_LEVEL)
     p.add_argument("symbol")
     p.add_argument("--watchlist", help="watchlist name; needed only if the symbol is on several")
     p.add_argument("--thesis", help="replace the thesis")

@@ -313,6 +313,22 @@ directly it would have changed the session that raised it.
   existing IC read path. The gap is listing gate series explicitly (I1's trigger-series field).
 - **Phase fit:** P1, with I1.
 
+### I9. Direct IC writes from the session, replacing handoff blocks (raised 2026-10-06, shipped 2026-10-06)
+- **Failure:** every IC change went through a handoff block the operator pasted to IC's executor by
+  hand. Approval already happened in the session, so the block was a copy step: proposals from 10/2
+  sat unapplied for four days.
+- **Shipped:** hub #32 with IC #381/#383. The session writes with `hub ic` verbs and an
+  `advisor:write` token; every write is logged in `ic_writes` (pending, then applied, failed or
+  unknown) with an IC receipt, and `hub ic revert` undoes one. `--yes` (after a yes in chat) gates
+  trades, alert removal and deactivation, and every level change (thresholds, target prices, entry
+  zones). Flow C and I5's draft queue are retired.
+- **Open:**
+  - IC's executor used to verify quotes before applying a change (its rule 2). A direct write skips
+    that; decide whether `hub ic` should check a level against the latest quote before sending.
+  - The write token sits in the instance's `.env.local`, which the session launcher resolves. Keep
+    it out of unattended jobs (the planned sweep and pulse should hold a `pack:read` token only).
+  - Whether a batch of related level changes can share one confirmation instead of one per write.
+
 ## IC-side changes (separate track, in `investing_companion`)
 
 - **The advisor starter kit graduates.** `docs/advisor-starter-kit/` moves to this repo as its
