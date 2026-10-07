@@ -282,6 +282,7 @@ class ScanRow:
     ret20: float | None = None
     ret60: float | None = None
     rs20: float | None = None
+    rs60: float | None = None
     pct52w: float | None = None
     trend: str = "—"
     crossed: str | None = None  # "up" | "down" | None
@@ -681,13 +682,13 @@ def _close_view(current: dict, out: list[View]) -> None:
         current["claim"] = " ".join(current.pop("claim_lines")).strip()
     elif "claim" in current:
         current.pop("claim", None)
-    if not current.get("id") or not current.get("weight"):
+    if not current.get("id") or not current.get("weight") or current["weight"].casefold() == "skip":
         return
     out.append(
         View(
             id=current["id"],
             title=current.get("title", current["id"]),
-            weight=current["weight"],
+            weight=current["weight"].casefold(),
             watching=tuple(current.get("watching") or ()),
             beats=tuple(current.get("beats") or ()),
             claim=current.get("claim", ""),
@@ -717,10 +718,9 @@ def load_scan_file(path: Path | str) -> Scan:
           ]
         }
 
-    ``benchmark`` and ``asof`` are required at the top level, ``ticker`` and
-    ``close`` in every row; ``ret20``, ``ret60``, ``rs20``, ``pct52w``,
-    ``sma200``, ``trend``, ``crossed`` and the row's own ``asof`` are
-    optional and default to "not measured". Rows are sorted by ticker so
+    ``close`` in every row; ``ret20``, ``ret60``, ``rs20``, ``rs60``,
+    ``pct52w``, ``sma200``, ``trend``, ``crossed`` and the row's own
+    ``asof`` are optional and default to "not measured". Rows are sorted by ticker so
     two reads of the same file yield the same scan. Anything malformed
     raises ``LetterError`` naming the file, so the CLI can fail loudly
     instead of grading views against half a scan.
@@ -758,7 +758,7 @@ def load_scan_file(path: Path | str) -> Scan:
         if isinstance(close, bool) or not isinstance(close, (int, float)):
             raise LetterError(f"{where}: missing numeric 'close'")
         metrics: dict[str, float | None] = {}
-        for metric in ("ret20", "ret60", "rs20", "pct52w", "sma200"):
+        for metric in ("ret20", "ret60", "rs20", "rs60", "pct52w", "sma200"):
             value = raw.get(metric)
             if value is None:
                 metrics[metric] = None
@@ -782,6 +782,7 @@ def load_scan_file(path: Path | str) -> Scan:
                 ret20=metrics["ret20"],
                 ret60=metrics["ret60"],
                 rs20=metrics["rs20"],
+                rs60=metrics["rs60"],
                 pct52w=metrics["pct52w"],
                 trend=trend,
                 crossed=crossed,
@@ -893,7 +894,7 @@ def rotation_chart(scan: Scan, *, width: int = 24) -> str:
         scan.rows,
         key=lambda r: (r.rs20 is None, -(r.rs20 or 0.0)),
     )
-    scale = max([abs(r.rs20 or 0.0) for r in ranked] or [1.0])
+    scale = max([abs(r.rs20 or 0.0) for r in ranked] or [1.0]) or 1.0
     out = [
         f"Rotation, {scan.asof} (relative to {scan.benchmark})",
         "",
@@ -1232,29 +1233,37 @@ TRIGGER_BEATS = 4  # a beats "would make it lead" condition met
 
 
 def ask_candidates_for(result: LetterResult) -> list[dict]:
-    """Map findings to ask candidates. Pure: no DB writes, no Herald mint."""
+    """Map only findings with evidence for a documented ask trigger."""
     out: list[dict] = []
     for f in result.findings:
         trigger: int | None = None
         reason: str = ""
+        finding_trigger = f.get("trigger", "")
+        classes = set(f.get("classes") or ())
         if f["verdict"] == "contradicts":
             trigger = TRIGGER_INVALIDATION
             reason = "contradicts the standing view outright — invalidation risk"
-        elif f["verdict"] == "extends" and f["source"] == "triage-queue":
-            if "200-day trend" in f["trigger"]:
-                trigger = TRIGGER_RUNG
-                reason = "instrument crossed its 200-day trend — rung trigger near"
-            elif "52-week" in f["trigger"]:
-                trigger = TRIGGER_RUNG
-                reason = "instrument at a 52-week extreme — rung trigger near"
-        elif f["source"] == "mv-analyst" and f["verdict"] == "extends":
-            classes = set(f.get("classes") or ())
-            if "lead" in (f.get("weight") or "") and classes:
-                trigger = TRIGGER_BEATS
-                reason = "mv-analyst foregrounded an event on a lead-weight view's beat"
-            else:
-                trigger = TRIGGER_CALL
-                reason = "corpus event on a beat the view names — dated call resolving"
+        elif (
+            f["verdict"] == "extends"
+            and f["source"] == "scan"
+            and ("200-day trend" in finding_trigger or "52-week" in finding_trigger)
+        ):
+            trigger = TRIGGER_RUNG
+            reason = "scan regime event is a rung trigger firing or near"
+        elif (
+            f["source"] == "mv-analyst"
+            and f["verdict"] == "extends"
+            and "dated-call-resolving" in classes
+        ):
+            trigger = TRIGGER_CALL
+            reason = "dated call is resolving on a view that bears on the book"
+        elif (
+            f["source"] == "mv-analyst"
+            and f["verdict"] == "extends"
+            and "would-make-lead" in classes
+        ):
+            trigger = TRIGGER_BEATS
+            reason = 'beat event meets the view\'s "would make it lead" condition'
         if trigger is None:
             continue
         out.append(

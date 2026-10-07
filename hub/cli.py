@@ -758,6 +758,11 @@ def _letter_midweek_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="hand the written letter to HUB_LETTER_SEND_CMD",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow a no-scan rerun to replace a scan-backed letter",
+    )
 
 
 def cmd_letter_midweek(args: argparse.Namespace) -> int:
@@ -767,9 +772,11 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     days compose the deterministic visual and (with ``--model``) a short
     drafter summary, then write the file at ``<out-dir>/<date>-midweek.md``.
     The market leg runs only when ``--scan-file`` names a real scan source;
-    without it the leg is off and the output says so. ``--deliver`` hands
-    the file to ``$HUB_LETTER_SEND_CMD`` (unset: a clear refusal, nonzero
-    exit); memory is recorded only after a successful delivery.
+    without it the leg is off and the output says so. A no-scan rerun refuses
+    to replace a scan-backed letter unless ``--force`` is set. ``--deliver``
+    hands the file to ``$HUB_LETTER_SEND_CMD`` (unset: a clear refusal,
+    nonzero exit); memory and a delivery marker are recorded only after a
+    successful delivery.
     """
     name = "letter midweek"
     if args.date is None:
@@ -780,6 +787,22 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         except ValueError:
             return _fail(name, f"invalid --date {args.date!r} (expected YYYY-MM-DD)")
     asof = on.isoformat()
+    out_path = args.out_dir / f"{asof}-midweek.md"
+    delivery_marker = out_path.with_suffix(".delivered")
+    if args.deliver and delivery_marker.is_file():
+        print(f"letter already delivered: {asof}")
+        return 0
+    if args.scan_file is None and out_path.is_file() and not args.force:
+        try:
+            existing = out_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return _fail(name, exc)
+        if "Market leg off: no scan source configured" not in existing:
+            return _fail(
+                name,
+                f"refusing to overwrite scan-backed letter for {asof} without"
+                " --scan-file; pass --force to replace it",
+            )
     if not args.db.is_file():
         return _fail(name, f"database not found: {args.db} (run `hub db init`)")
 
@@ -838,6 +861,7 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         subject = f"Investing Hub Midweek Letter — {asof}"
         try:
             receipt = letter.default_sender(out_path, subject=subject)
+            letter.write_text_atomic(delivery_marker, f"{asof}\n")
         except (letter.LetterError, OSError) as exc:
             return _fail(name, exc)
         print(f"letter delivered: {receipt}")

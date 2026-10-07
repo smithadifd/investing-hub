@@ -123,6 +123,31 @@ def test_parse_views_file_handles_empty_or_malformed():
     assert _views("views-quiet.md") == []
 
 
+def test_parse_views_file_omits_weight_skip(tmp_path):
+    views_file = tmp_path / "views.md"
+    views_file.write_text(
+        "\n".join(
+            [
+                "### Paused view",
+                "Id: paused",
+                "Weight: skip",
+                "Watching: BOT",
+                "Claim: This view is intentionally inactive.",
+                "Confirms when: BOT rs20 >= -100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    views = letter.parse_views_file(views_file)
+    scan = letter.Scan(
+        benchmark="BAA",
+        asof="2026-02-10",
+        rows=(letter.ScanRow(ticker="BOT", close=100.0, rs20=1.0),),
+    )
+    assert views == []
+    assert letter.gate(views, scan, letter.Corpus(), [], "2026-02-10").findings == ()
+
+
 # ---------------------------------------------------------------------------
 # scan source: load_scan_file
 # ---------------------------------------------------------------------------
@@ -178,6 +203,33 @@ def test_load_scan_file_missing_benchmark_raises(tmp_path):
     bad.write_text('{"asof": "2026-02-09", "rows": []}', encoding="utf-8")
     with pytest.raises(letter.LetterError, match="benchmark"):
         letter.load_scan_file(bad)
+
+
+def test_rs60_threshold_uses_loaded_scan_metric(tmp_path):
+    scan_file = tmp_path / "scan.json"
+    scan_file.write_text(
+        json.dumps(
+            {
+                "benchmark": "BAA",
+                "asof": "2026-02-10",
+                "rows": [{"ticker": "BOT", "close": 100.0, "rs60": 4.5}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    view = letter.View(
+        id="rs60-view",
+        title="RS60 view",
+        weight="standing",
+        watching=("BOT",),
+        confirms_when=({"ticker": "BOT", "metric": "rs60", "op": ">=", "value": 4.0},),
+    )
+    scan = letter.load_scan_file(scan_file)
+    result = letter.gate([view], scan, letter.Corpus(), [], "2026-02-10")
+    assert scan.rows[0].rs60 == 4.5
+    assert [(finding["key"], finding["verdict"]) for finding in result.findings] == [
+        ("BOT", "confirms")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -662,18 +714,83 @@ def test_rotation_visual_handles_missing_percentile():
     assert "n/a" in chart
 
 
+def test_rotation_visual_all_zero_rs20_is_neutral():
+    scan = letter.Scan(
+        benchmark="BAA",
+        asof="2026-02-10",
+        rows=(
+            letter.ScanRow(ticker="AAA", close=100.0, rs20=0.0),
+            letter.ScanRow(ticker="BBB", close=50.0, rs20=0.0),
+        ),
+    )
+    chart = letter.rotation_chart(scan)
+    assert chart.count("+0.00") == 2
+    assert chart.count("|") == 2
+
+
 # ---------------------------------------------------------------------------
 # ask candidates
 # ---------------------------------------------------------------------------
 
 
-def test_ask_candidates_for_contradicts_is_trigger_1():
-    result = letter.gate(_views("views-0.md"), _scan(), _corpus(), [], "2026-02-10")
-    asks = letter.ask_candidates_for(result)
-    triggers = {ask["trigger"] for ask in asks}
-    assert letter.TRIGGER_INVALIDATION in triggers
-    # corpus extends -> trigger 3 or 4 (depending on weight)
-    assert triggers & {letter.TRIGGER_CALL, letter.TRIGGER_BEATS}
+def _ask_result(**overrides):
+    finding = {
+        "view_id": "view",
+        "view_title": "View",
+        "key": "BOT",
+        "verdict": "extends",
+        "source": "scan",
+        "trigger": "",
+    }
+    finding.update(overrides)
+    return letter.LetterResult(
+        date=date(2026, 2, 10),
+        quiet=False,
+        findings=(finding,),
+    )
+
+
+def test_ask_candidates_for_contradiction_is_trigger_1():
+    asks = letter.ask_candidates_for(_ask_result(verdict="contradicts"))
+    assert [ask["trigger"] for ask in asks] == [letter.TRIGGER_INVALIDATION]
+
+
+def test_ask_candidates_for_scan_rung_event_is_trigger_2():
+    asks = letter.ask_candidates_for(
+        _ask_result(trigger="BOT is at the 97th percentile of its own 52-week range")
+    )
+    assert [ask["trigger"] for ask in asks] == [letter.TRIGGER_RUNG]
+
+
+def test_ask_candidates_for_dated_call_resolving_is_trigger_3():
+    asks = letter.ask_candidates_for(
+        _ask_result(
+            source="mv-analyst",
+            classes=["dated-call-resolving"],
+        )
+    )
+    assert [ask["trigger"] for ask in asks] == [letter.TRIGGER_CALL]
+
+
+def test_ask_candidates_for_would_make_lead_is_trigger_4():
+    asks = letter.ask_candidates_for(
+        _ask_result(
+            source="mv-analyst",
+            classes=["would-make-lead"],
+        )
+    )
+    assert [ask["trigger"] for ask in asks] == [letter.TRIGGER_BEATS]
+
+
+def test_ask_candidates_theme_axis_alone_is_not_a_dated_call_or_lead_condition():
+    asks = letter.ask_candidates_for(
+        _ask_result(
+            source="mv-analyst",
+            weight="lead",
+            classes=["theme-axis"],
+        )
+    )
+    assert asks == []
 
 
 def test_ask_candidates_for_quiet_letter_is_empty():
@@ -814,6 +931,52 @@ def test_cli_same_date_rerun_reproduces_letter_byte_for_byte(db, letter_roots, t
     assert len(set(second_lines)) == len(second_lines)
 
 
+def test_cli_no_scan_rerun_refuses_scan_backed_overwrite_without_force(
+    db, letter_roots, tmp_path, capsys
+):
+    body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
+    _seed_thesis_doc(db, body)
+    scan_args = _letter_args(db, tmp_path, letter_roots, scan_file=SCAN_FILE)
+    assert main(scan_args) == 0
+    capsys.readouterr()
+    letter_path = tmp_path / "out" / "2026-02-10-midweek.md"
+    scan_backed = letter_path.read_bytes()
+
+    assert main(_letter_args(db, tmp_path, letter_roots)) == 1
+    captured = capsys.readouterr()
+    assert "refusing to overwrite scan-backed letter" in captured.err
+    assert letter_path.read_bytes() == scan_backed
+
+    assert main(_letter_args(db, tmp_path, letter_roots, extra=["--force"])) == 0
+    captured = capsys.readouterr()
+    assert "market leg off: no scan source configured" in captured.out
+    assert "Market leg off: no scan source configured" in letter_path.read_text(encoding="utf-8")
+
+
+def test_cli_deliver_sends_once_per_issue_date(db, letter_roots, tmp_path, monkeypatch, capsys):
+    body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
+    _seed_thesis_doc(db, body)
+    send_log = tmp_path / "send.log"
+    sender = tmp_path / "sender.sh"
+    sender.write_text(f'#!/bin/sh\necho sent >> "{send_log}"\n', encoding="utf-8")
+    sender.chmod(0o755)
+    monkeypatch.setenv("HUB_LETTER_SEND_CMD", str(sender))
+    args = _letter_args(
+        db,
+        tmp_path,
+        letter_roots,
+        scan_file=SCAN_FILE,
+        extra=["--deliver"],
+    )
+
+    assert main(args) == 0
+    assert "letter delivered" in capsys.readouterr().out
+    assert main(args) == 0
+    assert capsys.readouterr().out.strip() == "letter already delivered: 2026-02-10"
+    assert send_log.read_text(encoding="utf-8").splitlines() == ["sent"]
+    assert (tmp_path / "out" / "2026-02-10-midweek.delivered").is_file()
+
+
 def test_cli_failed_delivery_leaves_memory_unchanged_then_retry_delivers(
     db, letter_roots, tmp_path, monkeypatch, capsys
 ):
@@ -831,15 +994,22 @@ def test_cli_failed_delivery_leaves_memory_unchanged_then_retry_delivers(
     memory = tmp_path / "memory.jsonl"
     assert not memory.exists() or memory.read_text(encoding="utf-8") == ""
     assert (tmp_path / "out" / "2026-02-10-midweek.md").exists()
+    assert not (tmp_path / "out" / "2026-02-10-midweek.delivered").exists()
 
     working = tmp_path / "sender-ok.sh"
-    working.write_text('#!/bin/sh\necho "sent: $2"\n', encoding="utf-8")
+    send_log = tmp_path / "retry-send.log"
+    working.write_text(
+        f'#!/bin/sh\necho sent >> "{send_log}"\necho "sent: $2"\n',
+        encoding="utf-8",
+    )
     working.chmod(0o755)
     monkeypatch.setenv("HUB_LETTER_SEND_CMD", str(working))
     rc = main(_letter_args(db, tmp_path, letter_roots, scan_file=SCAN_FILE, extra=["--deliver"]))
     assert rc == 0
     captured = capsys.readouterr()
     assert "letter delivered" in captured.out
+    assert send_log.read_text(encoding="utf-8").splitlines() == ["sent"]
+    assert (tmp_path / "out" / "2026-02-10-midweek.delivered").is_file()
     assert memory.exists()
     lines = memory.read_text(encoding="utf-8").splitlines()
     assert lines

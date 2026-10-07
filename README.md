@@ -66,11 +66,13 @@ from thesis document bodies; see `hub/letter.py` for the views shape). The scan 
 }
 ```
 
-`ticker` and `close` are required in each row; `ret20`, `ret60`, `rs20`, `pct52w`, `sma200`,
-`trend`, `crossed` and the row's own `asof` are optional. Without `--scan-file` the market leg
-is off — the output says "market leg off: no scan source configured" and only the corpus leg
-can clear the gate. A quiet week prints one status line and writes no file. `--deliver` hands
-the written letter to the command in `HUB_LETTER_SEND_CMD` (unset means a clear refusal); the
+`ticker` and `close` are required in each row; `ret20`, `ret60`, `rs20`, `rs60`, `pct52w`,
+`sma200`, `trend`, `crossed` and the row's own `asof` are optional. Without `--scan-file` the
+market leg is off — the output says "market leg off: no scan source configured" and only the
+corpus leg can clear the gate. A no-scan rerun refuses to replace that date's scan-backed letter
+unless `--force` is given. A quiet week prints one status line and writes no file. `--deliver`
+hands the written letter to the command in `HUB_LETTER_SEND_CMD` (unset means a clear refusal).
+A successful delivery is marked per issue date, so rerunning `--deliver` does not send twice; the
 repo itself schedules nothing and sends nothing.
 
 ## Onboarding
