@@ -718,9 +718,10 @@ def load_scan_file(path: Path | str) -> Scan:
           ]
         }
 
+    ``benchmark`` and ``asof`` are required at the top level, ``ticker`` and
     ``close`` in every row; ``ret20``, ``ret60``, ``rs20``, ``rs60``,
-    ``pct52w``, ``sma200``, ``trend``, ``crossed`` and the row's own
-    ``asof`` are optional and default to "not measured". Rows are sorted by ticker so
+    ``pct52w``, ``sma200``, ``trend``, ``crossed`` and the row's own ``asof``
+    are optional and default to "not measured". Rows are sorted by ticker so
     two reads of the same file yield the same scan. Anything malformed
     raises ``LetterError`` naming the file, so the CLI can fail loudly
     instead of grading views against half a scan.
