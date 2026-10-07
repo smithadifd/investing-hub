@@ -180,6 +180,23 @@ def load_memory(path: Path | str | None) -> list[MemoryRecord]:
     return out
 
 
+def memory_records_text(records: list[MemoryRecord]) -> str:
+    """Serialize memory records in the JSON-lines format used by the memory file."""
+    lines = []
+    for row in records:
+        payload = {
+            "date": row.date,
+            "view_id": row.view_id,
+            "source": row.source,
+            "key": row.key,
+            "verdict": row.verdict,
+            "trigger": row.trigger,
+            "summary": row.summary,
+        }
+        lines.append(json.dumps(payload, sort_keys=True) + "\n")
+    return "".join(lines)
+
+
 def append_memory(path: Path | str, records: list[MemoryRecord]) -> int:
     """Append whole JSON lines; an empty list writes nothing."""
     if not records:
@@ -189,17 +206,7 @@ def append_memory(path: Path | str, records: list[MemoryRecord]) -> int:
     if str(parent):
         parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as fh:
-        for row in records:
-            payload = {
-                "date": row.date,
-                "view_id": row.view_id,
-                "source": row.source,
-                "key": row.key,
-                "verdict": row.verdict,
-                "trigger": row.trigger,
-                "summary": row.summary,
-            }
-            fh.write(json.dumps(payload, sort_keys=True) + "\n")
+        fh.write(memory_records_text(records))
     return len(records)
 
 

@@ -47,7 +47,6 @@ so `hub custodian list` tells several accounts at one custodian apart.
 
 Run it without `--apply` first to see how the headers map and how many rows were found; pass
 `--map "Header As Written=field"` for any column it does not recognise. Overrides are persisted
-
 with the snapshot so `hub custodian list` reuses them when counting data rows.
 
 ### Midweek letter

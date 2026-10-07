@@ -774,10 +774,10 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     The market leg runs only when ``--scan-file`` names a real scan source;
     without it the leg is off and the output says so. A no-scan rerun refuses
     to replace a scan-backed letter unless ``--force`` is set. ``--deliver``
-    hands the file to ``$HUB_LETTER_SEND_CMD`` (unset: a clear refusal,
-    nonzero exit); memory and a delivery marker are recorded only after a
-    successful delivery. An interrupted delivery leaves a claim file and
-    needs a manual inbox check before retrying; it never resends on its own.
+    claims the issue date before rendering, hands the file to
+    ``$HUB_LETTER_SEND_CMD``, and records the delivered findings before the
+    delivery marker. An interrupted delivery leaves a claim file and needs a
+    manual inbox check before retrying; it never resends on its own.
     """
     name = "letter midweek"
     if args.date is None:
@@ -791,20 +791,77 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     out_path = args.out_dir / f"{asof}-midweek.md"
     delivery_marker = out_path.with_suffix(".delivered")
     delivery_claim = out_path.with_suffix(".delivering")
-    already_delivered = args.deliver and delivery_marker.is_file()
-    if not already_delivered and args.scan_file is None and out_path.is_file() and not args.force:
+    delivered_records_path = out_path.with_suffix(".delivered.jsonl")
+    claim_taken = False
+    keep_claim = False
+
+    def finish(rc: int) -> int:
+        nonlocal claim_taken
+        if not claim_taken or keep_claim:
+            return rc
+        try:
+            delivery_claim.unlink()
+        except OSError as exc:
+            return _fail(name, f"could not release delivery claim {delivery_claim}: {exc}")
+        claim_taken = False
+        return rc
+
+    if args.deliver:
+        try:
+            args.out_dir.mkdir(parents=True, exist_ok=True)
+            claim_fd = os.open(delivery_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return _fail(
+                name,
+                f"{delivery_claim}: delivery for {asof} is in progress or was interrupted "
+                "(remove the claim after checking the inbox to retry)",
+            )
+        except OSError as exc:
+            return _fail(name, exc)
+        os.close(claim_fd)
+        claim_taken = True
+
+        if delivery_marker.is_file():
+            try:
+                if not delivered_records_path.is_file():
+                    raise letter.LetterError(
+                        f"delivered findings sidecar {delivered_records_path} is missing or unreadable"
+                    )
+                try:
+                    delivered_records = letter.load_memory(delivered_records_path)
+                except letter.MemoryMalformed as exc:
+                    raise letter.LetterError(
+                        f"delivered findings sidecar {delivered_records_path} is missing or unreadable"
+                    ) from exc
+                if not delivered_records or any(row.date != asof for row in delivered_records):
+                    raise letter.LetterError(
+                        f"delivered findings sidecar {delivered_records_path} is missing or unreadable"
+                    )
+                current_memory = letter.load_memory(args.memory_path)
+                letter.append_memory(
+                    args.memory_path,
+                    letter.records_to_append(current_memory, delivered_records, asof=asof),
+                )
+            except (letter.LetterError, OSError) as exc:
+                return finish(_fail(name, exc))
+            print(f"letter already delivered: {asof}")
+            return finish(0)
+
+    if args.scan_file is None and out_path.is_file() and not args.force:
         try:
             existing = out_path.read_text(encoding="utf-8")
         except OSError as exc:
-            return _fail(name, exc)
+            return finish(_fail(name, exc))
         if "Market leg off: no scan source configured" not in existing:
-            return _fail(
-                name,
-                f"refusing to overwrite scan-backed letter for {asof} without"
-                " --scan-file; pass --force to replace it",
+            return finish(
+                _fail(
+                    name,
+                    f"refusing to overwrite scan-backed letter for {asof} without"
+                    " --scan-file; pass --force to replace it",
+                )
             )
     if not args.db.is_file():
-        return _fail(name, f"database not found: {args.db} (run `hub db init`)")
+        return finish(_fail(name, f"database not found: {args.db} (run `hub db init`)"))
 
     try:
         conn = store.connect(args.db)
@@ -822,7 +879,7 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         finally:
             conn.close()
     except (letter.LetterError, store.StoreError, sqlite3.Error, OSError) as exc:
-        return _fail(name, exc)
+        return finish(_fail(name, exc))
 
     if args.scan_file is None:
         scan = None
@@ -831,7 +888,7 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         try:
             scan = letter.load_scan_file(args.scan_file)
         except letter.LetterError as exc:
-            return _fail(name, exc)
+            return finish(_fail(name, exc))
         scan_note = f"market leg on (scan file: {args.scan_file})"
 
     mv_candidates = producers.mv_analyst_candidates(args.mv_analyst_root).candidates
@@ -840,7 +897,7 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     try:
         memory = letter.load_memory(args.memory_path)
     except letter.MemoryMalformed as exc:
-        return _fail(name, exc)
+        return finish(_fail(name, exc))
 
     result = letter.collect_letter(on=on, views=views, scan=scan, corpus=corpus, memory=memory)
     records = [
@@ -855,70 +912,36 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         )
         for f in result.findings
     ]
-    if already_delivered:
-        try:
-            letter.append_memory(
-                args.memory_path,
-                letter.records_to_append(memory, records, asof=asof),
-            )
-        except (letter.LetterError, OSError) as exc:
-            return _fail(name, exc)
-        print(f"letter already delivered: {asof}")
-        return 0
 
     provenance = _letter_provenance(result, model=args.model, scan_note=scan_note)
     if result.quiet:
         # One combined status line, exit 0, no file.
         print(f"{provenance} — {letter.compose_letter(result, model=None)}")
-        return 0
+        return finish(0)
     print(provenance)
 
     try:
         out_path = letter.write_letter(result, out_dir=args.out_dir, model=args.model)
     except (letter.LetterError, OSError) as exc:
-        return _fail(name, exc)
+        return finish(_fail(name, exc))
     print(f"letter written: {out_path}")
 
     if args.deliver:
-        try:
-            claim_fd = os.open(delivery_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            if delivery_marker.is_file():
-                try:
-                    current_memory = letter.load_memory(args.memory_path)
-                    letter.append_memory(
-                        args.memory_path,
-                        letter.records_to_append(current_memory, records, asof=asof),
-                    )
-                except (letter.LetterError, OSError) as exc:
-                    return _fail(name, exc)
-                print(f"letter already delivered: {asof}")
-                return 0
-            return _fail(
-                name,
-                f"{delivery_claim}: delivery for {asof} is in progress or was interrupted "
-                "(remove the claim after checking the inbox to retry)",
-            )
-        except OSError as exc:
-            return _fail(name, exc)
-        os.close(claim_fd)
-
         subject = f"Investing Hub Midweek Letter — {asof}"
         try:
             receipt = letter.default_sender(out_path, subject=subject)
         except (letter.LetterError, OSError) as exc:
-            try:
-                delivery_claim.unlink()
-            except OSError as release_exc:
-                return _fail(
-                    name,
-                    f"{exc}; could not release delivery claim {delivery_claim}: {release_exc}",
-                )
-            return _fail(name, exc)
+            return finish(_fail(name, exc))
+        keep_claim = True
         try:
+            letter.write_text_atomic(
+                delivered_records_path,
+                letter.memory_records_text(records),
+            )
             letter.write_text_atomic(delivery_marker, f"{asof}\n")
         except (letter.LetterError, OSError) as exc:
-            return _fail(name, exc)
+            return finish(_fail(name, exc))
+        keep_claim = False
         print(f"letter delivered: {receipt}")
 
     asks = letter.ask_candidates_for(result)
@@ -952,9 +975,9 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     try:
         letter.append_memory(args.memory_path, letter.records_to_append(memory, records, asof=asof))
     except (letter.LetterError, OSError) as exc:
-        return _fail(name, exc)
+        return finish(_fail(name, exc))
 
-    return 0
+    return finish(0)
 
 
 def _letter_provenance(result: letter.LetterResult, *, model: str | None, scan_note: str) -> str:
