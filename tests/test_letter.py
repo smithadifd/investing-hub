@@ -1018,10 +1018,7 @@ def test_cli_failed_delivery_leaves_memory_unchanged_then_retry_delivers(
     assert first["verdict"] in ("confirms", "contradicts", "extends")
 
 
-
-def test_cli_delivery_claim_blocks_another_sender(
-    db, letter_roots, tmp_path, monkeypatch, capsys
-):
+def test_cli_delivery_claim_blocks_another_sender(db, letter_roots, tmp_path, monkeypatch, capsys):
     body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
     _seed_thesis_doc(db, body)
     claim = tmp_path / "out" / "2026-02-10-midweek.delivering"
@@ -1118,9 +1115,7 @@ def test_cli_marker_failure_keeps_claim_and_prevents_resend(
     assert len(sends) == 1
 
 
-def test_cli_delivered_rerun_repairs_memory_once(
-    db, letter_roots, tmp_path, monkeypatch, capsys
-):
+def test_cli_delivered_rerun_repairs_memory_once(db, letter_roots, tmp_path, monkeypatch, capsys):
     body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
     _seed_thesis_doc(db, body)
     sends = []
@@ -1169,6 +1164,7 @@ def test_cli_delivered_rerun_repairs_memory_once(
     assert capsys.readouterr().out.strip() == "letter already delivered: 2026-02-10"
     assert memory_path.read_bytes() == repaired
     assert len(sends) == 1
+
 
 def test_cli_drafter_failure_exits_nonzero_and_writes_no_file(
     db, letter_roots, tmp_path, monkeypatch, capsys

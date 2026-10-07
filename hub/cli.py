@@ -866,7 +866,6 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         print(f"letter already delivered: {asof}")
         return 0
 
-
     provenance = _letter_provenance(result, model=args.model, scan_note=scan_note)
     if result.quiet:
         # One combined status line, exit 0, no file.
