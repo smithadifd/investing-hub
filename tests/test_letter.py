@@ -1018,6 +1018,158 @@ def test_cli_failed_delivery_leaves_memory_unchanged_then_retry_delivers(
     assert first["verdict"] in ("confirms", "contradicts", "extends")
 
 
+
+def test_cli_delivery_claim_blocks_another_sender(
+    db, letter_roots, tmp_path, monkeypatch, capsys
+):
+    body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
+    _seed_thesis_doc(db, body)
+    claim = tmp_path / "out" / "2026-02-10-midweek.delivering"
+    claim.parent.mkdir(parents=True)
+    claim.write_text("", encoding="utf-8")
+    sends = []
+
+    def counting_sender(path, *, subject):
+        sends.append((path, subject))
+        return "sent"
+
+    monkeypatch.setattr(letter, "default_sender", counting_sender)
+    rc = main(_letter_args(db, tmp_path, letter_roots, scan_file=SCAN_FILE, extra=["--deliver"]))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert str(claim) in captured.err
+    assert "in progress or was interrupted" in captured.err
+    assert sends == []
+
+
+def test_cli_sender_failure_releases_claim_for_one_retry(
+    db, letter_roots, tmp_path, monkeypatch, capsys
+):
+    body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
+    _seed_thesis_doc(db, body)
+    claim = tmp_path / "out" / "2026-02-10-midweek.delivering"
+    successful_sends = []
+    fail = True
+
+    def counting_sender(path, *, subject):
+        nonlocal fail
+        if fail:
+            fail = False
+            raise letter.LetterError("sender failed")
+        successful_sends.append((path, subject))
+        return "sent"
+
+    monkeypatch.setattr(letter, "default_sender", counting_sender)
+    args = _letter_args(
+        db,
+        tmp_path,
+        letter_roots,
+        scan_file=SCAN_FILE,
+        extra=["--deliver"],
+    )
+
+    assert main(args) == 1
+    assert "sender failed" in capsys.readouterr().err
+    assert not claim.exists()
+
+    assert main(args) == 0
+    assert "letter delivered" in capsys.readouterr().out
+    assert len(successful_sends) == 1
+
+
+def test_cli_marker_failure_keeps_claim_and_prevents_resend(
+    db, letter_roots, tmp_path, monkeypatch, capsys
+):
+    body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
+    _seed_thesis_doc(db, body)
+    sends = []
+
+    def counting_sender(path, *, subject):
+        sends.append((path, subject))
+        return "sent"
+
+    real_write_text_atomic = letter.write_text_atomic
+
+    def fail_marker(path, text):
+        if Path(path).suffix == ".delivered":
+            raise OSError("marker failed")
+        real_write_text_atomic(path, text)
+
+    monkeypatch.setattr(letter, "default_sender", counting_sender)
+    monkeypatch.setattr(letter, "write_text_atomic", fail_marker)
+    args = _letter_args(
+        db,
+        tmp_path,
+        letter_roots,
+        scan_file=SCAN_FILE,
+        extra=["--deliver"],
+    )
+    claim = tmp_path / "out" / "2026-02-10-midweek.delivering"
+
+    assert main(args) == 1
+    assert "marker failed" in capsys.readouterr().err
+    assert claim.exists()
+    assert len(sends) == 1
+
+    assert main(args) == 1
+    captured = capsys.readouterr()
+    assert str(claim) in captured.err
+    assert len(sends) == 1
+
+
+def test_cli_delivered_rerun_repairs_memory_once(
+    db, letter_roots, tmp_path, monkeypatch, capsys
+):
+    body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
+    _seed_thesis_doc(db, body)
+    sends = []
+    fail_append = True
+
+    def counting_sender(path, *, subject):
+        sends.append((path, subject))
+        return "sent"
+
+    real_append_memory = letter.append_memory
+
+    def append_memory_once_recovered(path, records):
+        nonlocal fail_append
+        if fail_append:
+            fail_append = False
+            raise OSError("memory append failed")
+        return real_append_memory(path, records)
+
+    monkeypatch.setattr(letter, "default_sender", counting_sender)
+    monkeypatch.setattr(letter, "append_memory", append_memory_once_recovered)
+    args = _letter_args(
+        db,
+        tmp_path,
+        letter_roots,
+        scan_file=SCAN_FILE,
+        extra=["--deliver"],
+    )
+    memory_path = tmp_path / "memory.jsonl"
+
+    assert main(args) == 1
+    assert "memory append failed" in capsys.readouterr().err
+    assert len(sends) == 1
+    assert (tmp_path / "out" / "2026-02-10-midweek.delivered").exists()
+
+    assert main(args) == 0
+    assert capsys.readouterr().out.strip() == "letter already delivered: 2026-02-10"
+    repaired = memory_path.read_bytes()
+    rows = [json.loads(line) for line in repaired.splitlines()]
+    identities = {(row["view_id"], row["key"], row["verdict"]) for row in rows}
+    assert rows
+    assert all(row["date"] == "2026-02-10" for row in rows)
+    assert len(rows) == len(identities)
+    assert len(sends) == 1
+
+    assert main(args) == 0
+    assert capsys.readouterr().out.strip() == "letter already delivered: 2026-02-10"
+    assert memory_path.read_bytes() == repaired
+    assert len(sends) == 1
+
 def test_cli_drafter_failure_exits_nonzero_and_writes_no_file(
     db, letter_roots, tmp_path, monkeypatch, capsys
 ):

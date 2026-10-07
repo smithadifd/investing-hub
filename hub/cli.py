@@ -776,7 +776,8 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     to replace a scan-backed letter unless ``--force`` is set. ``--deliver``
     hands the file to ``$HUB_LETTER_SEND_CMD`` (unset: a clear refusal,
     nonzero exit); memory and a delivery marker are recorded only after a
-    successful delivery.
+    successful delivery. An interrupted delivery leaves a claim file and
+    needs a manual inbox check before retrying; it never resends on its own.
     """
     name = "letter midweek"
     if args.date is None:
@@ -789,10 +790,9 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     asof = on.isoformat()
     out_path = args.out_dir / f"{asof}-midweek.md"
     delivery_marker = out_path.with_suffix(".delivered")
-    if args.deliver and delivery_marker.is_file():
-        print(f"letter already delivered: {asof}")
-        return 0
-    if args.scan_file is None and out_path.is_file() and not args.force:
+    delivery_claim = out_path.with_suffix(".delivering")
+    already_delivered = args.deliver and delivery_marker.is_file()
+    if not already_delivered and args.scan_file is None and out_path.is_file() and not args.force:
         try:
             existing = out_path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -843,6 +843,29 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         return _fail(name, exc)
 
     result = letter.collect_letter(on=on, views=views, scan=scan, corpus=corpus, memory=memory)
+    records = [
+        letter.MemoryRecord(
+            date=asof,
+            view_id=f["view_id"],
+            source=f["source"],
+            key=f["key"],
+            verdict=f["verdict"],
+            trigger=f.get("trigger", ""),
+            summary=f.get("summary", ""),
+        )
+        for f in result.findings
+    ]
+    if already_delivered:
+        try:
+            letter.append_memory(
+                args.memory_path,
+                letter.records_to_append(memory, records, asof=asof),
+            )
+        except (letter.LetterError, OSError) as exc:
+            return _fail(name, exc)
+        print(f"letter already delivered: {asof}")
+        return 0
+
 
     provenance = _letter_provenance(result, model=args.model, scan_note=scan_note)
     if result.quiet:
@@ -858,9 +881,42 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     print(f"letter written: {out_path}")
 
     if args.deliver:
+        try:
+            claim_fd = os.open(delivery_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if delivery_marker.is_file():
+                try:
+                    current_memory = letter.load_memory(args.memory_path)
+                    letter.append_memory(
+                        args.memory_path,
+                        letter.records_to_append(current_memory, records, asof=asof),
+                    )
+                except (letter.LetterError, OSError) as exc:
+                    return _fail(name, exc)
+                print(f"letter already delivered: {asof}")
+                return 0
+            return _fail(
+                name,
+                f"{delivery_claim}: delivery for {asof} is in progress or was interrupted "
+                "(remove the claim after checking the inbox to retry)",
+            )
+        except OSError as exc:
+            return _fail(name, exc)
+        os.close(claim_fd)
+
         subject = f"Investing Hub Midweek Letter — {asof}"
         try:
             receipt = letter.default_sender(out_path, subject=subject)
+        except (letter.LetterError, OSError) as exc:
+            try:
+                delivery_claim.unlink()
+            except OSError as release_exc:
+                return _fail(
+                    name,
+                    f"{exc}; could not release delivery claim {delivery_claim}: {release_exc}",
+                )
+            return _fail(name, exc)
+        try:
             letter.write_text_atomic(delivery_marker, f"{asof}\n")
         except (letter.LetterError, OSError) as exc:
             return _fail(name, exc)
@@ -895,18 +951,6 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     # letter write when --deliver is not set), so a failed send can be
     # retried without the findings going quiet on their own record.
     try:
-        records = [
-            letter.MemoryRecord(
-                date=asof,
-                view_id=f["view_id"],
-                source=f["source"],
-                key=f["key"],
-                verdict=f["verdict"],
-                trigger=f.get("trigger", ""),
-                summary=f.get("summary", ""),
-            )
-            for f in result.findings
-        ]
         letter.append_memory(args.memory_path, letter.records_to_append(memory, records, asof=asof))
     except (letter.LetterError, OSError) as exc:
         return _fail(name, exc)
