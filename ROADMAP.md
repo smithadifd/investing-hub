@@ -329,6 +329,21 @@ directly it would have changed the session that raised it.
     it out of unattended jobs (the planned sweep and pulse should hold a `pack:read` token only).
   - Whether a batch of related level changes can share one confirmation instead of one per write.
 
+### I10. Living-desk archive: carry forward the merit gate (raised 2026-10-05)
+- **Failure:** the living-desk repo carries a load-bearing weekly product (the desk document, the
+  mechanical merit gate, the rotation and 52-week scans, the deterministic rotation visual) on a
+  separate code path. Two repos doing one weekly job is the kind of drift the project exists to
+  prevent; keeping the desk running also keeps its rotation scanner and beat pipeline in scope,
+  and the hub already ingests the producers it depended on.
+- **Shape:** archive the desk repo (reversible) after the hub carries its leg (c) rotation and
+  52-week scans, its mechanical merit gate, and the deterministic rotation visual. The port
+  lives in `hub letter midweek` (P2); the archive happens once that command produces a stand-alone
+  weekly letter and the brief has been read alongside it for a full month. The archive step
+  itself is tracked separately in the market-data layer plan.
+- **Sharpen:** what has to land before the archive is safe? The desk's beats × MacroVoices
+  pipeline is the same producer the hub now reads through `hub producers list`; the desk's
+  stand-alone memory file becomes `out/letters/memory.jsonl` here.
+
 ## IC-side changes (separate track, in `investing_companion`)
 
 - **The advisor starter kit graduates.** `docs/advisor-starter-kit/` moves to this repo as its
@@ -358,7 +373,7 @@ directly it would have changed the session that raised it.
 - **Sweep cadence.** Pre-market daily plus post-close? Event-driven when a digest lands?
 - **Where IC serves contract docs from:** an API endpoint, or raw files at the deployed commit.
 - **Retention** for findings and asks.
-- **Incubating items I1–I8** each carry their own sharpen questions (see above). I1 and I2 share
+- **Incubating items I1–I10** each carry their own sharpen questions (see above). I1 and I2 share
   the implementation intention primitive schema (`rungs` with cue type, status, slip/expiry, follow-up).
 
 ## Source material

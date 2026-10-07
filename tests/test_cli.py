@@ -36,6 +36,7 @@ SURFACE_COMMANDS = [
     "custodian list",
     "producers list",
     "pulse write",
+    "letter midweek",
     "session-open",
 ]
 

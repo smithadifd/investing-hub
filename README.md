@@ -28,6 +28,7 @@ hub --help
 | `scripts/hub-session.sh` | Start Claude Code with `MASSIVE_API_KEY` and `IC_API_TOKEN` resolved from `.env.local` (needs `OP_CONNECT_HOST`) |
 | `hub doc list` / `show` / `revise` | List documents, print any revision of one, and append a session revision (`revise` needs `--source-ref`; a new slug needs `--kind`) |
 | `hub custodian import` / `list` | Import a custodian positions or transactions CSV as one snapshot (dry run by default; `--apply` writes) and list the snapshots |
+| `hub letter midweek` | The weekly letter on the mechanical merit gate (silent unless something clears; `--deliver` hands it to `HUB_LETTER_SEND_CMD`) |
 | `hub session-open` | Checks run when an advisor session opens |
 
 ### Custodian exports
@@ -46,7 +47,32 @@ so `hub custodian list` tells several accounts at one custodian apart.
 
 Run it without `--apply` first to see how the headers map and how many rows were found; pass
 `--map "Header As Written=field"` for any column it does not recognise. Overrides are persisted
+
 with the snapshot so `hub custodian list` reuses them when counting data rows.
+
+### Midweek letter
+
+`hub letter midweek` grades the thesis documents in the store against two legs of evidence: the
+beats corpus from mv-analyst, and a rotation scan supplied with `--scan-file` (views are parsed
+from thesis document bodies; see `hub/letter.py` for the views shape). The scan is a JSON file:
+
+```json
+{
+  "benchmark": "BAA",
+  "asof": "2026-02-09",
+  "rows": [
+    {"ticker": "BOT", "close": 103.0, "ret20": 3.0, "rs20": -1.0, "pct52w": 40.0}
+  ]
+}
+```
+
+`ticker` and `close` are required in each row; `ret20`, `ret60`, `rs20`, `pct52w`, `sma200`,
+`trend`, `crossed` and the row's own `asof` are optional. Without `--scan-file` the market leg
+is off — the output says "market leg off: no scan source configured" and only the corpus leg
+can clear the gate. A quiet week prints one status line and writes no file. `--deliver` hands
+the written letter to the command in `HUB_LETTER_SEND_CMD` (unset means a clear refusal); the
+repo itself schedules nothing and sends nothing.
+
 ## Onboarding
 
 The [onboarding kit](docs/onboarding/README.md) is a fill-in-the-blanks scaffold for standing up your

@@ -14,6 +14,7 @@ from hub import (
     ic,
     ic_cli,
     importer,
+    letter,
     preflight,
     producers,
     pulse,
@@ -707,6 +708,199 @@ def cmd_pulse_write(args: argparse.Namespace) -> int:
     return 0
 
 
+def _letter_midweek_args(parser: argparse.ArgumentParser) -> None:
+    _db_path_arg(parser)
+    parser.add_argument(
+        "--date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="letter issue date (default: today UTC)",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=letter.DEFAULT_OUT_DIR,
+        help="output directory (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "draft a 1-4 word summary paragraph with this model"
+            " (default: no prose, mechanical letter only)"
+        ),
+    )
+    parser.add_argument(
+        "--memory-path",
+        type=Path,
+        default=letter.DEFAULT_OUT_DIR / "memory.jsonl",
+        help="repeat-suppression memory file (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--mv-analyst-root",
+        type=Path,
+        default=producers.DEFAULT_MV_ANALYST_ROOT,
+        help="mv-analyst home directory (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--scan-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "rotation scan source as a JSON file (benchmark, asof, rows;"
+            " see README); unset means the market leg is off"
+        ),
+    )
+    parser.add_argument(
+        "--deliver",
+        action="store_true",
+        help="hand the written letter to HUB_LETTER_SEND_CMD",
+    )
+
+
+def cmd_letter_midweek(args: argparse.Namespace) -> int:
+    """Run the midweek letter on the mechanical merit gate.
+
+    Quiet days print one combined status line and write no file. Active
+    days compose the deterministic visual and (with ``--model``) a short
+    drafter summary, then write the file at ``<out-dir>/<date>-midweek.md``.
+    The market leg runs only when ``--scan-file`` names a real scan source;
+    without it the leg is off and the output says so. ``--deliver`` hands
+    the file to ``$HUB_LETTER_SEND_CMD`` (unset: a clear refusal, nonzero
+    exit); memory is recorded only after a successful delivery.
+    """
+    name = "letter midweek"
+    if args.date is None:
+        on = pulse.today_utc()
+    else:
+        try:
+            on = _date.fromisoformat(args.date)
+        except ValueError:
+            return _fail(name, f"invalid --date {args.date!r} (expected YYYY-MM-DD)")
+    asof = on.isoformat()
+    if not args.db.is_file():
+        return _fail(name, f"database not found: {args.db} (run `hub db init`)")
+
+    try:
+        conn = store.connect(args.db)
+        try:
+            docs = store.list_documents(conn)
+            doc_bodies: dict[str, str] = {}
+            for doc in docs:
+                if doc["kind"] != "thesis":
+                    continue
+                body = store.get_document_revision(conn, doc["slug"])["body"]
+                doc_bodies[doc["slug"]] = body
+            views = letter.build_views_from_documents(
+                conn, body_for=lambda slug: doc_bodies.get(slug, "")
+            )
+        finally:
+            conn.close()
+    except (letter.LetterError, store.StoreError, sqlite3.Error, OSError) as exc:
+        return _fail(name, exc)
+
+    if args.scan_file is None:
+        scan = None
+        scan_note = "market leg off: no scan source configured"
+    else:
+        try:
+            scan = letter.load_scan_file(args.scan_file)
+        except letter.LetterError as exc:
+            return _fail(name, exc)
+        scan_note = f"market leg on (scan file: {args.scan_file})"
+
+    mv_candidates = producers.mv_analyst_candidates(args.mv_analyst_root).candidates
+    corpus = letter.build_corpus_from_mv_analyst_candidates(mv_candidates)
+
+    try:
+        memory = letter.load_memory(args.memory_path)
+    except letter.MemoryMalformed as exc:
+        return _fail(name, exc)
+
+    result = letter.collect_letter(on=on, views=views, scan=scan, corpus=corpus, memory=memory)
+
+    provenance = _letter_provenance(result, model=args.model, scan_note=scan_note)
+    if result.quiet:
+        # One combined status line, exit 0, no file.
+        print(f"{provenance} — {letter.compose_letter(result, model=None)}")
+        return 0
+    print(provenance)
+
+    try:
+        out_path = letter.write_letter(result, out_dir=args.out_dir, model=args.model)
+    except (letter.LetterError, OSError) as exc:
+        return _fail(name, exc)
+    print(f"letter written: {out_path}")
+
+    if args.deliver:
+        subject = f"Investing Hub Midweek Letter — {asof}"
+        try:
+            receipt = letter.default_sender(out_path, subject=subject)
+        except (letter.LetterError, OSError) as exc:
+            return _fail(name, exc)
+        print(f"letter delivered: {receipt}")
+
+    asks = letter.ask_candidates_for(result)
+    if asks:
+        sidecar = out_path.with_suffix(".asks.json")
+        try:
+            letter.write_text_atomic(
+                sidecar,
+                json.dumps(
+                    {
+                        "date": asof,
+                        "candidates": asks,
+                        "note": (
+                            "Ask candidates mapped from this letter's"
+                            " findings; minting a Herald ask is a separate,"
+                            " supervised step."
+                        ),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+            )
+            print(f"ask candidates: {sidecar}")
+        except OSError as exc:
+            print(f"hub {name}: warn: could not write ask sidecar: {exc}", file=sys.stderr)
+
+    # Memory is recorded only after a successful delivery (and after the
+    # letter write when --deliver is not set), so a failed send can be
+    # retried without the findings going quiet on their own record.
+    try:
+        records = [
+            letter.MemoryRecord(
+                date=asof,
+                view_id=f["view_id"],
+                source=f["source"],
+                key=f["key"],
+                verdict=f["verdict"],
+                trigger=f.get("trigger", ""),
+                summary=f.get("summary", ""),
+            )
+            for f in result.findings
+        ]
+        letter.append_memory(args.memory_path, letter.records_to_append(memory, records, asof=asof))
+    except (letter.LetterError, OSError) as exc:
+        return _fail(name, exc)
+
+    return 0
+
+
+def _letter_provenance(result: letter.LetterResult, *, model: str | None, scan_note: str) -> str:
+    return (
+        f"letter: model={model or 'none'}"
+        f" date={result.date.isoformat()}"
+        f" findings={len(result.findings)}"
+        f" suppressed={len(result.suppressed)}"
+        f" quiet={'yes' if result.quiet else 'no'}"
+        f"; {scan_note}"
+    )
+
+
 # group -> subcommand -> (help, handler). A group of None is a top-level command.
 COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], int]]]] = {
     "db": {
@@ -748,6 +942,12 @@ COMMANDS: dict[str | None, dict[str, tuple[str, Callable[[argparse.Namespace], i
     },
     "pulse": {
         "write": ("draft today's book section into out/book/<date>.md", cmd_pulse_write),
+    },
+    "letter": {
+        "midweek": (
+            "write the midweek letter on the mechanical merit gate",
+            cmd_letter_midweek,
+        ),
     },
     None: {
         "session-open": ("run the session-open checks", cmd_session_open),
@@ -793,6 +993,7 @@ ARGUMENTS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "custodian list": _db_path_arg,
     "producers list": _producers_list_args,
     "pulse write": _pulse_write_args,
+    "letter midweek": _letter_midweek_args,
     "session-open": _session_open_args,
     **ic_cli.ARGUMENTS,
 }
