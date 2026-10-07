@@ -1168,7 +1168,6 @@ def test_cli_marker_failure_keeps_claim_and_prevents_resend(
     delivered_records = tmp_path / "out" / "2026-02-10-midweek.delivered.jsonl"
     assert letter.load_memory(delivered_records)
 
-
     assert main(args) == 1
     captured = capsys.readouterr()
     assert str(claim) in captured.err

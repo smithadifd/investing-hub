@@ -792,6 +792,9 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     delivery_marker = out_path.with_suffix(".delivered")
     delivery_claim = out_path.with_suffix(".delivering")
     delivered_records_path = out_path.with_suffix(".delivered.jsonl")
+    delivered_records_error = (
+        f"delivered findings sidecar {delivered_records_path} is missing or unreadable"
+    )
     claim_taken = False
     keep_claim = False
 
@@ -824,19 +827,13 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         if delivery_marker.is_file():
             try:
                 if not delivered_records_path.is_file():
-                    raise letter.LetterError(
-                        f"delivered findings sidecar {delivered_records_path} is missing or unreadable"
-                    )
+                    raise letter.LetterError(delivered_records_error)
                 try:
                     delivered_records = letter.load_memory(delivered_records_path)
                 except letter.MemoryMalformed as exc:
-                    raise letter.LetterError(
-                        f"delivered findings sidecar {delivered_records_path} is missing or unreadable"
-                    ) from exc
+                    raise letter.LetterError(delivered_records_error) from exc
                 if not delivered_records or any(row.date != asof for row in delivered_records):
-                    raise letter.LetterError(
-                        f"delivered findings sidecar {delivered_records_path} is missing or unreadable"
-                    )
+                    raise letter.LetterError(delivered_records_error)
                 current_memory = letter.load_memory(args.memory_path)
                 letter.append_memory(
                     args.memory_path,
