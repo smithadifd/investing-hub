@@ -23,12 +23,15 @@ Definitions, all on sessions aligned to the benchmark's latest date:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 
 from hub.letter import Scan, ScanRow
 
 # A 52-week window in trading sessions. Shorter history cannot place a
 # close in that range, so the ticker is left out of the scan.
 MIN_SESSIONS = 252
+MIN_CALENDAR_DAYS = 330
+MAX_CALENDAR_DAYS = 400
 RET20 = 20
 RET60 = 60
 SMA_N = 200
@@ -77,13 +80,21 @@ def score_row(ticker: str, series: Series, benchmark: Series) -> ScanRow:
     )
 
 
-def require_benchmark(series: Series) -> str:
+def require_benchmark(series: Series, asof_date: date | str | None = None) -> str:
     """Refuse a benchmark that cannot anchor relative strength. Returns its as-of date."""
     if not series:
         raise ScoreError("no sessions")
     asof = series[-1][0]
     trimmed = _aligned(series, asof)
     _require_window(trimmed)
+    if asof_date is not None:
+        target = date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
+        bench_d = date.fromisoformat(asof)
+        days = (target - bench_d).days
+        if days > 7:
+            raise ScoreError(
+                f"stale history ({asof} is {days} calendar days before {target.isoformat()})"
+            )
     return asof
 
 
@@ -103,7 +114,16 @@ def _aligned(series: Series, asof: str) -> list[tuple[str, float]]:
 def _require_window(series: Sequence[tuple[str, float]]) -> None:
     if len(series) < MIN_SESSIONS:
         raise ScoreError(f"fewer than {MIN_SESSIONS} sessions")
-    closes = [close for _, close in series[-MIN_SESSIONS:]]
+    window = series[-MIN_SESSIONS:]
+    d_start = date.fromisoformat(window[0][0])
+    d_end = date.fromisoformat(window[-1][0])
+    span = (d_end - d_start).days
+    if span < MIN_CALENDAR_DAYS or span > MAX_CALENDAR_DAYS:
+        raise ScoreError(
+            f"252-session window spans {span} calendar days "
+            f"(expected {MIN_CALENDAR_DAYS}–{MAX_CALENDAR_DAYS})"
+        )
+    closes = [close for _, close in window]
     if any(close <= 0 for close in closes):
         raise ScoreError("non-positive close")
     if min(closes) == max(closes):

@@ -29,8 +29,8 @@ Stage 1 composes the letter:
 This is the **port** of living-desk's gate: the same mechanical rule over the
 hub's producers (``mv-analyst``) and the local knowledge store
 (``documents``). The scan is an explicit input. ``--scan-file`` reads the
-documented JSON shape via ``load_scan_file``. ``--scan-source stooq`` builds
-the same ``Scan`` from keyless daily history (see ``hub/stooq.py`` and
+documented JSON shape via ``load_scan_file``. ``--scan-source yahoo`` builds
+the same ``Scan`` from daily history (see ``hub/yahoo.py`` and
 ``hub/scan_score.py``). With no scan source configured the market leg is
 **off**: no market finding can clear, the provenance line and the letter say
 so, and only the corpus leg can clear the gate.

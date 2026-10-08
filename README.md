@@ -70,20 +70,24 @@ beats corpus from mv-analyst, and a market leg. Views are parsed from thesis doc
 `ticker` and `close` are required in each row; `ret20`, `ret60`, `rs20`, `rs60`, `pct52w`,
 `sma200`, `trend`, `crossed` and the row's own `asof` are optional.
 
-`--scan-source stooq` builds that same scan from Stooq's keyless daily history
-(`https://stooq.com/q/d/l/?s=<symbol>&i=d`). It needs `--scan-benchmark TICKER` and fetches the
-benchmark plus every ticker the views watch. A ticker with no dot is requested as `<ticker>.us`.
-Scoring uses closes only: the 20- and 60-session return, relative strength versus the benchmark
-in percentage points, where the close sits in the trailing 252-session range (`pct52w`), the
-200-session average, whether the close is above or below that average, and whether it crossed
-the average on the latest session.
+`--scan-source yahoo` builds that same scan from Yahoo's daily history
+(`https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=2y&interval=1d`).
+It needs `--scan-benchmark TICKER` and fetches the benchmark plus every ticker
+the views watch. Scoring uses closes only: the 20- and 60-session return,
+relative strength versus the benchmark in percentage points, where the close
+sits in the trailing 252-session range (`pct52w`), the 200-session average,
+whether the close is above or below that average, and whether it crossed the
+average on the latest session.
 
-A ticker is left out of the scan, with a note on the status line, when its history is shorter
-than 252 sessions, the closes in that window do not move, a close is not a positive number, the
-CSV is empty or malformed, Stooq answers "no data", or the fetch fails. No stand-in number is
-written in its place. If the benchmark itself fails any of those checks, the command refuses and
-writes no letter. `--scan-file` and `--scan-source` cannot be combined. `--scan-benchmark` is
-only valid with the Stooq source.
+A ticker is left out of the scan, with a note on the status line, when its
+history is shorter than 252 sessions, its 252-session window does not span
+~330 to ~400 calendar days, the closes in that window do not move, a close is
+not a positive number, the JSON is empty or malformed, Yahoo returns an error,
+or the fetch fails. No stand-in number is written in its place. If the
+benchmark itself fails any of those checks or its latest session is more than 7
+calendar days before the run date, the command refuses and writes no letter.
+`--scan-file` and `--scan-source` cannot be combined. `--scan-benchmark` is
+only valid with the Yahoo source.
 
 Without either source the market leg is off — the output says "market leg off: no scan source
 configured" and only the corpus leg can clear the gate. A no-scan rerun refuses to replace that
