@@ -38,11 +38,6 @@ cd "${HUB_INSTANCE_DIR:-.}" 2>/dev/null || {
   exit 2
 }
 
-if [ "$mode" != env ] && [ ! -f .env.local ]; then
-  echo "hub-session: .env.local is missing (looked in $(pwd)); copy .env.example to .env.local there, run from the instance directory, or set HUB_INSTANCE_DIR (see README § Massive)" >&2
-  exit 2
-fi
-
 if [ -n "${HUB_SESSION_MODE:-}" ]; then
   case "$mode" in
     op)
@@ -64,6 +59,11 @@ if [ -n "${HUB_SESSION_MODE:-}" ]; then
       fi
       ;;
   esac
+fi
+
+if [ "$mode" != env ] && [ ! -f .env.local ]; then
+  echo "hub-session: .env.local is missing (looked in $(pwd)); copy .env.example to .env.local there, run from the instance directory, or set HUB_INSTANCE_DIR (see README § Massive)" >&2
+  exit 2
 fi
 
 echo "hub-session: using $mode" >&2
