@@ -1,0 +1,9 @@
+{
+  "benchmark": "BAA",
+  "asof": "2026-02-09",
+  "rows": [
+    {"ticker": "BOT", "close": 103.0, "ret20": 3.0, "ret60": 6.0, "rs20": -1.0, "pct52w": 40.0},
+    {"ticker": "BDU", "close": 101.0, "ret20": 1.0, "ret60": 2.0, "rs20": -1.0, "pct52w": 55.0},
+    {"ticker": "BCD", "close": 100.0, "ret20": -2.0, "ret60": -4.0, "rs20": -2.0}
+  ]
+}
