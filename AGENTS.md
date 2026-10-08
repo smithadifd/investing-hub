@@ -111,6 +111,9 @@ hub/producers/   read-only producer adapters (mv-analyst index/analyses, week-ah
 hub/ic.py        IC adapter: pack read path plus the write client (`IcClient.call`, name resolution)
 hub/ic_writes.py the advisor-action planners, the `ic_writes` log, receipts and revert
 hub/ic_cli.py    argparse wiring for the `hub ic` write verbs
+hub/letter.py    midweek letter: merit gate, composer, JSON scan file
+hub/scan_score.py pure scoring of daily closes into a rotation scan
+hub/stooq.py     keyless Stooq daily CSV reader for the letter's market leg
 hub/store.py     SQLite connection, migrations, document revisions, custodian snapshots, backups
 hub/restore.py   backup restore check (integrity, tables, row counts)
 hub/migrations/  numbered SQL migrations (NNNN_name.sql), shipped as package data
