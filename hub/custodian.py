@@ -10,6 +10,7 @@ synonym sets are transcribed from Investing Companion's broker-CSV importer.
 import csv
 import io
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -330,10 +331,23 @@ def parse(
         if filled > densest_cells:
             densest, densest_cells = index, filled
     if best is None:
-        candidate = rows[densest] if densest_cells else []
+        candidate_idx = densest
+        for index, row in enumerate(rows[:MAX_HEADER_SCAN_ROWS]):
+            if not any(cell.strip() for cell in row):
+                continue
+            later = [r for r in rows[index + 1 :] if any(c.strip() for c in r)]
+            if not later:
+                continue
+            counts = Counter(len(r) for r in later)
+            top = counts.most_common(2)
+            if top and (len(top) == 1 or top[0][1] > top[1][1]):
+                if len(row) == top[0][0]:
+                    candidate_idx = index
+                    break
+        candidate = rows[candidate_idx] if densest_cells else []
         headers_found = ", ".join(candidate)
         if densest_cells:
-            headers_found += f" (line {densest + 1})"
+            headers_found += f" (line {candidate_idx + 1})"
         raise CustodianError(
             f"no header row found in the first {MAX_HEADER_SCAN_ROWS} rows"
             f" ({kind} need {', '.join(REQUIRED[kind])} columns);"

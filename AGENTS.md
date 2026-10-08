@@ -76,8 +76,8 @@ positions `symbol, quantity`. A missing one exits 1 naming it, the file's header
 `--map 'header=field'` form. `--apply` needs an existing database and writes one snapshot
 (`raw` = the file text, `mapping` = stored `--map` overrides, `source_ref` = the path relative
 to the current working directory, else as given, `account` from `--account` or the `<account-label>` folder of the drop
-layout, else none, `as_of` from `--as-of` or the newest date in a date column); a repeat
-of the same `(custodian, kind, as_of, source_ref)` is a no-op. `hub custodian list` takes `--db PATH`
+layout, else none, `as_of` from `--as-of` or the newest date in a date column); a repeated
+`--apply` import that produces the same `(custodian, kind, as_of, source_ref)` is a no-op. `hub custodian list` takes `--db PATH`
 and reuses stored mappings when counting rows (ignoring trailing summary, total and disclaimer lines);
 for a snapshot stored without an account it shows the label derived from `source_ref`, else `-`.
 Drop layout: README "Custodian exports".

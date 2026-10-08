@@ -158,6 +158,20 @@ def test_no_recognized_header_names_best_candidate_row_not_the_preamble_title():
     assert "Account Export" not in message
 
 
+def test_no_recognized_header_prefers_table_width_row_over_wide_preamble():
+    text = (
+        "Statement Title,Export Date,Period Start,Period End,Format,Version\n"
+        "CustomTicker,CustomUnits\n"
+        "TEST1,10\n"
+        "TEST2,20\n"
+    )
+    with pytest.raises(custodian.CustodianError) as caught:
+        custodian.parse(text, "positions")
+    message = str(caught.value)
+    assert "headers found: CustomTicker, CustomUnits (line 2)" in message
+    assert "Statement Title" not in message
+
+
 def test_newest_date_uses_first_date_of_an_as_of_cell():
     parsed = custodian.parse(TRANSACTIONS, "transactions")
     assert parsed.dates == ["2026-01-02", "2026-01-09"]

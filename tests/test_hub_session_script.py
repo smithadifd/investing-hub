@@ -152,6 +152,30 @@ def test_forced_connect_without_resolver_exits_2_before_exec(box: Sandbox) -> No
     )
 
 
+def test_forced_op_without_op_or_env_local_reports_op_first(tmp_path: Path) -> None:
+    box = Sandbox(tmp_path, with_op=False, with_env_local=False)
+    result = box.run(HUB_SESSION_MODE="op")
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == (
+        "hub-session: HUB_SESSION_MODE=op but the 1Password CLI op is not on PATH\n"
+    )
+
+
+def test_forced_connect_without_resolver_or_env_local_reports_connect_first(
+    tmp_path: Path,
+) -> None:
+    box = Sandbox(tmp_path, with_op=True, with_env_local=False)
+    (box.home / ".claude" / "scripts" / "op-resolve.py").unlink()
+    result = box.run(HUB_SESSION_MODE="connect", **CONNECT)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"hub-session: HUB_SESSION_MODE=connect but {box.home}/.claude/scripts/op-resolve.py "
+        "is missing\n"
+    )
+
+
 def test_forced_env_with_one_variable_exits_2_before_exec(box: Sandbox) -> None:
     for present in BOTH:
         result = box.run(HUB_SESSION_MODE="env", **{present: BOTH[present]})
