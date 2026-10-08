@@ -848,6 +848,7 @@ def test_cli_quiet_week_prints_one_line_and_writes_no_file(db, letter_roots, tmp
     assert "market leg off: no scan source configured" in line
     assert "nothing cleared the merit gate" in line
     assert not (tmp_path / "out").exists() or not list((tmp_path / "out").glob("*.md"))
+    assert not (tmp_path / "out" / "2026-02-10-midweek.delivering").exists()
 
 
 def test_cli_quiet_week_with_scan_source_still_one_line(db, letter_roots, tmp_path, capsys):
@@ -863,6 +864,33 @@ def test_cli_quiet_week_with_scan_source_still_one_line(db, letter_roots, tmp_pa
     assert "market leg on" in out_lines[0]
     assert "nothing cleared the merit gate" in out_lines[0]
     assert not (tmp_path / "out").exists() or not list((tmp_path / "out").glob("*.md"))
+
+
+def test_cli_producer_exception_releases_claim_and_immediate_rerun_proceeds(
+    db, letter_roots, tmp_path, monkeypatch, capsys
+):
+    real_candidates = producers.mv_analyst_candidates
+    attempts = 0
+
+    def fail_once(root):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("themes unreadable")
+        return real_candidates(root)
+
+    monkeypatch.setattr(producers, "mv_analyst_candidates", fail_once)
+    args = _letter_args(db, tmp_path, letter_roots)
+    claim = tmp_path / "out" / "2026-02-10-midweek.delivering"
+
+    with pytest.raises(PermissionError, match="themes unreadable"):
+        main(args)
+    assert not claim.exists()
+
+    assert main(args) == 0
+    capsys.readouterr()
+    assert attempts == 2
+    assert not claim.exists()
 
 
 def test_cli_active_week_with_scan_file_writes_letter(db, letter_roots, tmp_path, capsys):
@@ -1016,6 +1044,38 @@ def test_cli_failed_delivery_leaves_memory_unchanged_then_retry_delivers(
     first = json.loads(lines[0])
     assert first["date"] == "2026-02-10"
     assert first["verdict"] in ("confirms", "contradicts", "extends")
+
+
+def test_cli_claimed_non_delivery_reports_date_claim(db, letter_roots, tmp_path, capsys):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    claim = out_dir / "2026-02-10-midweek.delivering"
+    claim.write_text("", encoding="utf-8")
+
+    assert main(_letter_args(db, tmp_path, letter_roots)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        f"hub letter midweek: {claim}: another run for 2026-02-10 holds the date claim\n"
+    )
+
+
+def test_cli_claimed_delivery_keeps_interrupted_delivery_message(
+    db, letter_roots, tmp_path, capsys
+):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    claim = out_dir / "2026-02-10-midweek.delivering"
+    claim.write_text("", encoding="utf-8")
+
+    args = _letter_args(db, tmp_path, letter_roots, extra=["--deliver"])
+    assert main(args) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        f"hub letter midweek: {claim}: delivery for 2026-02-10 is in progress or was "
+        "interrupted (remove the claim after checking the inbox to retry)\n"
+    )
 
 
 def test_cli_date_claim_blocks_non_delivery_run_before_rendering(
@@ -1175,6 +1235,8 @@ def test_cli_marker_failure_keeps_claim_and_prevents_resend(
     assert main(args) == 1
     captured = capsys.readouterr()
     assert str(claim) in captured.err
+    assert "remove the claim after checking the inbox to retry" in captured.err
+    assert claim.exists()
     assert len(sends) == 1
 
 

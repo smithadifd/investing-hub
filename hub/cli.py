@@ -815,168 +815,178 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         args.out_dir.mkdir(parents=True, exist_ok=True)
         claim_fd = os.open(delivery_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
-        return _fail(
-            name,
-            f"{delivery_claim}: delivery for {asof} is in progress or was interrupted "
-            "(remove the claim after checking the inbox to retry)",
-        )
+        if args.deliver:
+            detail = (
+                f"{delivery_claim}: delivery for {asof} is in progress or was interrupted "
+                "(remove the claim after checking the inbox to retry)"
+            )
+        else:
+            detail = f"{delivery_claim}: another run for {asof} holds the date claim"
+        return _fail(name, detail)
     except OSError as exc:
         return _fail(name, exc)
-    os.close(claim_fd)
     claim_taken = True
 
-    if args.deliver:
-        if delivery_marker.is_file():
-            try:
-                if not delivered_records_path.is_file():
-                    raise letter.LetterError(delivered_records_error)
+    try:
+        os.close(claim_fd)
+        if args.deliver:
+            if delivery_marker.is_file():
                 try:
-                    delivered_records = letter.load_memory(delivered_records_path)
-                except letter.MemoryMalformed as exc:
-                    raise letter.LetterError(delivered_records_error) from exc
-                if not delivered_records or any(row.date != asof for row in delivered_records):
-                    raise letter.LetterError(delivered_records_error)
-                current_memory = letter.load_memory(args.memory_path)
-                letter.append_memory(
-                    args.memory_path,
-                    letter.records_to_append(current_memory, delivered_records, asof=asof),
+                    if not delivered_records_path.is_file():
+                        raise letter.LetterError(delivered_records_error)
+                    try:
+                        delivered_records = letter.load_memory(delivered_records_path)
+                    except letter.MemoryMalformed as exc:
+                        raise letter.LetterError(delivered_records_error) from exc
+                    if not delivered_records or any(row.date != asof for row in delivered_records):
+                        raise letter.LetterError(delivered_records_error)
+                    current_memory = letter.load_memory(args.memory_path)
+                    letter.append_memory(
+                        args.memory_path,
+                        letter.records_to_append(current_memory, delivered_records, asof=asof),
+                    )
+                except (letter.LetterError, OSError) as exc:
+                    return finish(_fail(name, exc))
+                print(f"letter already delivered: {asof}")
+                return finish(0)
+
+        if args.scan_file is None and out_path.is_file() and not args.force:
+            try:
+                existing = out_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                return finish(_fail(name, exc))
+            if "Market leg off: no scan source configured" not in existing:
+                return finish(
+                    _fail(
+                        name,
+                        f"refusing to overwrite scan-backed letter for {asof} without"
+                        " --scan-file; pass --force to replace it",
+                    )
                 )
+        if not args.db.is_file():
+            return finish(_fail(name, f"database not found: {args.db} (run `hub db init`)"))
+
+        try:
+            conn = store.connect(args.db)
+            try:
+                docs = store.list_documents(conn)
+                doc_bodies: dict[str, str] = {}
+                for doc in docs:
+                    if doc["kind"] != "thesis":
+                        continue
+                    body = store.get_document_revision(conn, doc["slug"])["body"]
+                    doc_bodies[doc["slug"]] = body
+                views = letter.build_views_from_documents(
+                    conn, body_for=lambda slug: doc_bodies.get(slug, "")
+                )
+            finally:
+                conn.close()
+        except (letter.LetterError, store.StoreError, sqlite3.Error, OSError) as exc:
+            return finish(_fail(name, exc))
+
+        if args.scan_file is None:
+            scan = None
+            scan_note = "market leg off: no scan source configured"
+        else:
+            try:
+                scan = letter.load_scan_file(args.scan_file)
+            except letter.LetterError as exc:
+                return finish(_fail(name, exc))
+            scan_note = f"market leg on (scan file: {args.scan_file})"
+
+        mv_candidates = producers.mv_analyst_candidates(args.mv_analyst_root).candidates
+        corpus = letter.build_corpus_from_mv_analyst_candidates(mv_candidates)
+
+        try:
+            memory = letter.load_memory(args.memory_path)
+        except letter.MemoryMalformed as exc:
+            return finish(_fail(name, exc))
+
+        result = letter.collect_letter(on=on, views=views, scan=scan, corpus=corpus, memory=memory)
+        records = [
+            letter.MemoryRecord(
+                date=asof,
+                view_id=f["view_id"],
+                source=f["source"],
+                key=f["key"],
+                verdict=f["verdict"],
+                trigger=f.get("trigger", ""),
+                summary=f.get("summary", ""),
+            )
+            for f in result.findings
+        ]
+
+        provenance = _letter_provenance(result, model=args.model, scan_note=scan_note)
+        if result.quiet:
+            # One combined status line, exit 0, no file.
+            print(f"{provenance} — {letter.compose_letter(result, model=None)}")
+            return finish(0)
+        print(provenance)
+
+        try:
+            out_path = letter.write_letter(result, out_dir=args.out_dir, model=args.model)
+        except (letter.LetterError, OSError) as exc:
+            return finish(_fail(name, exc))
+        print(f"letter written: {out_path}")
+
+        if args.deliver:
+            subject = f"Investing Hub Midweek Letter — {asof}"
+            try:
+                receipt = letter.default_sender(out_path, subject=subject)
             except (letter.LetterError, OSError) as exc:
                 return finish(_fail(name, exc))
-            print(f"letter already delivered: {asof}")
-            return finish(0)
-
-    if args.scan_file is None and out_path.is_file() and not args.force:
-        try:
-            existing = out_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            return finish(_fail(name, exc))
-        if "Market leg off: no scan source configured" not in existing:
-            return finish(
-                _fail(
-                    name,
-                    f"refusing to overwrite scan-backed letter for {asof} without"
-                    " --scan-file; pass --force to replace it",
+            keep_claim = True
+            try:
+                letter.write_text_atomic(
+                    delivered_records_path,
+                    letter.memory_records_text(records),
                 )
-            )
-    if not args.db.is_file():
-        return finish(_fail(name, f"database not found: {args.db} (run `hub db init`)"))
+                letter.write_text_atomic(delivery_marker, f"{asof}\n")
+            except (letter.LetterError, OSError) as exc:
+                return finish(_fail(name, exc))
+            keep_claim = False
+            print(f"letter delivered: {receipt}")
 
-    try:
-        conn = store.connect(args.db)
-        try:
-            docs = store.list_documents(conn)
-            doc_bodies: dict[str, str] = {}
-            for doc in docs:
-                if doc["kind"] != "thesis":
-                    continue
-                body = store.get_document_revision(conn, doc["slug"])["body"]
-                doc_bodies[doc["slug"]] = body
-            views = letter.build_views_from_documents(
-                conn, body_for=lambda slug: doc_bodies.get(slug, "")
-            )
-        finally:
-            conn.close()
-    except (letter.LetterError, store.StoreError, sqlite3.Error, OSError) as exc:
-        return finish(_fail(name, exc))
+        asks = letter.ask_candidates_for(result)
+        if asks:
+            sidecar = out_path.with_suffix(".asks.json")
+            try:
+                letter.write_text_atomic(
+                    sidecar,
+                    json.dumps(
+                        {
+                            "date": asof,
+                            "candidates": asks,
+                            "note": (
+                                "Ask candidates mapped from this letter's"
+                                " findings; minting a Herald ask is a separate,"
+                                " supervised step."
+                            ),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                )
+                print(f"ask candidates: {sidecar}")
+            except OSError as exc:
+                print(f"hub {name}: warn: could not write ask sidecar: {exc}", file=sys.stderr)
 
-    if args.scan_file is None:
-        scan = None
-        scan_note = "market leg off: no scan source configured"
-    else:
+        # Memory is recorded only after a successful delivery (and after the
+        # letter write when --deliver is not set), so a failed send can be
+        # retried without the findings going quiet on their own record.
         try:
-            scan = letter.load_scan_file(args.scan_file)
-        except letter.LetterError as exc:
+            letter.append_memory(
+                args.memory_path,
+                letter.records_to_append(memory, records, asof=asof),
+            )
+        except (letter.LetterError, OSError) as exc:
             return finish(_fail(name, exc))
-        scan_note = f"market leg on (scan file: {args.scan_file})"
 
-    mv_candidates = producers.mv_analyst_candidates(args.mv_analyst_root).candidates
-    corpus = letter.build_corpus_from_mv_analyst_candidates(mv_candidates)
-
-    try:
-        memory = letter.load_memory(args.memory_path)
-    except letter.MemoryMalformed as exc:
-        return finish(_fail(name, exc))
-
-    result = letter.collect_letter(on=on, views=views, scan=scan, corpus=corpus, memory=memory)
-    records = [
-        letter.MemoryRecord(
-            date=asof,
-            view_id=f["view_id"],
-            source=f["source"],
-            key=f["key"],
-            verdict=f["verdict"],
-            trigger=f.get("trigger", ""),
-            summary=f.get("summary", ""),
-        )
-        for f in result.findings
-    ]
-
-    provenance = _letter_provenance(result, model=args.model, scan_note=scan_note)
-    if result.quiet:
-        # One combined status line, exit 0, no file.
-        print(f"{provenance} — {letter.compose_letter(result, model=None)}")
         return finish(0)
-    print(provenance)
-
-    try:
-        out_path = letter.write_letter(result, out_dir=args.out_dir, model=args.model)
-    except (letter.LetterError, OSError) as exc:
-        return finish(_fail(name, exc))
-    print(f"letter written: {out_path}")
-
-    if args.deliver:
-        subject = f"Investing Hub Midweek Letter — {asof}"
-        try:
-            receipt = letter.default_sender(out_path, subject=subject)
-        except (letter.LetterError, OSError) as exc:
-            return finish(_fail(name, exc))
-        keep_claim = True
-        try:
-            letter.write_text_atomic(
-                delivered_records_path,
-                letter.memory_records_text(records),
-            )
-            letter.write_text_atomic(delivery_marker, f"{asof}\n")
-        except (letter.LetterError, OSError) as exc:
-            return finish(_fail(name, exc))
-        keep_claim = False
-        print(f"letter delivered: {receipt}")
-
-    asks = letter.ask_candidates_for(result)
-    if asks:
-        sidecar = out_path.with_suffix(".asks.json")
-        try:
-            letter.write_text_atomic(
-                sidecar,
-                json.dumps(
-                    {
-                        "date": asof,
-                        "candidates": asks,
-                        "note": (
-                            "Ask candidates mapped from this letter's"
-                            " findings; minting a Herald ask is a separate,"
-                            " supervised step."
-                        ),
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-            )
-            print(f"ask candidates: {sidecar}")
-        except OSError as exc:
-            print(f"hub {name}: warn: could not write ask sidecar: {exc}", file=sys.stderr)
-
-    # Memory is recorded only after a successful delivery (and after the
-    # letter write when --deliver is not set), so a failed send can be
-    # retried without the findings going quiet on their own record.
-    try:
-        letter.append_memory(args.memory_path, letter.records_to_append(memory, records, asof=asof))
-    except (letter.LetterError, OSError) as exc:
-        return finish(_fail(name, exc))
-
-    return finish(0)
+    finally:
+        if claim_taken and not keep_claim:
+            finish(0)
 
 
 def _letter_provenance(result: letter.LetterResult, *, model: str | None, scan_note: str) -> str:
