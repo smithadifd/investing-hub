@@ -453,7 +453,7 @@ def test_pct52w_is_position_in_the_trailing_range():
     closes = [100.0] * 252
     closes[0] = 80.0
     closes[1] = 120.0
-    row = scan_score.score_row("XLK", _dated(closes), _bench())
+    row = scan_score.score_row("XLK", _dated(closes), _bench(), asof_date=date(2026, 10, 9))
     assert row.pct52w == pytest.approx(50.0)
 
 
@@ -462,14 +462,16 @@ def test_pct52w_uses_trailing_252_not_the_whole_file():
     closes[0] = 1.0  # outside the 252-session window
     closes[8] = 50.0  # inside the window, outside the last 200
     closes[-1] = 80.0
-    row = scan_score.score_row("XLK", _dated(closes), _dated(_flat(100.0, 260, last=104.0)))
+    row = scan_score.score_row(
+        "XLK", _dated(closes), _dated(_flat(100.0, 260, last=104.0)), asof_date=date(2026, 10, 9)
+    )
     assert row.pct52w == pytest.approx(60.0)
 
 
 def test_rs20_is_excess_return_in_percentage_points():
     ticker = _flat(100.0, last=110.0)  # +10% over 20 sessions
     bench = _flat(100.0, last=104.0)  # +4%
-    row = scan_score.score_row("XLK", _dated(ticker), _dated(bench))
+    row = scan_score.score_row("XLK", _dated(ticker), _dated(bench), asof_date=date(2026, 10, 9))
     assert row.ret20 == pytest.approx(10.0)
     assert row.rs20 == pytest.approx(6.0)
 
@@ -477,40 +479,48 @@ def test_rs20_is_excess_return_in_percentage_points():
 def test_rs60_is_excess_60_session_return():
     ticker = _flat(100.0, last=110.0)
     bench = _flat(100.0, last=104.0)
-    row = scan_score.score_row("XLK", _dated(ticker), _dated(bench))
+    row = scan_score.score_row("XLK", _dated(ticker), _dated(bench), asof_date=date(2026, 10, 9))
     assert row.ret60 == pytest.approx(10.0)
     assert row.rs60 == pytest.approx(6.0)
 
 
 def test_sma200_is_mean_of_last_200_closes():
     closes = _flat(100.0, last=110.0)
-    row = scan_score.score_row("XLK", _dated(closes), _bench())
+    row = scan_score.score_row("XLK", _dated(closes), _bench(), asof_date=date(2026, 10, 9))
     assert row.sma200 == pytest.approx((199 * 100 + 110) / 200)
 
 
 def test_trend_above_below_and_level():
-    above = scan_score.score_row("XLK", _dated(_flat(100.0, last=110.0)), _bench())
-    below = scan_score.score_row("XLK", _dated(_flat(100.0, last=90.0)), _bench())
+    above = scan_score.score_row(
+        "XLK", _dated(_flat(100.0, last=110.0)), _bench(), asof_date=date(2026, 10, 9)
+    )
+    below = scan_score.score_row(
+        "XLK", _dated(_flat(100.0, last=90.0)), _bench(), asof_date=date(2026, 10, 9)
+    )
     level = [90.0] + [100.0] * 251
-    equal = scan_score.score_row("XLK", _dated(level), _bench())
+    equal = scan_score.score_row("XLK", _dated(level), _bench(), asof_date=date(2026, 10, 9))
     assert above.trend == "above"
     assert below.trend == "below"
     assert equal.trend == "—"
 
 
 def test_crossed_up_from_on_the_average():
-    row = scan_score.score_row("XLK", _dated(_flat(100.0, last=110.0)), _bench())
+    row = scan_score.score_row(
+        "XLK", _dated(_flat(100.0, last=110.0)), _bench(), asof_date=date(2026, 10, 9)
+    )
     assert row.crossed == "up"
 
 
 def test_crossed_down_from_on_the_average():
-    row = scan_score.score_row("XLE", _dated(_flat(100.0, last=90.0)), _bench())
+    row = scan_score.score_row(
+        "XLE", _dated(_flat(100.0, last=90.0)), _bench(), asof_date=date(2026, 10, 9)
+    )
     assert row.crossed == "down"
 
 
 def test_no_cross_when_price_stays_above_the_average():
     closes = [90.0] + [110.0] * 249 + [120.0, 120.0]
-    row = scan_score.score_row("XLK", _dated(closes), _bench())
+    row = scan_score.score_row("XLK", _dated(closes), _bench(), asof_date=date(2026, 10, 9))
     assert row.trend == "above"
     assert row.crossed is None
 
@@ -533,10 +543,10 @@ def test_crossed_fails_if_sma_prev_equals_sma_today():
 
 
 def test_score_uses_the_benchmark_date_not_a_later_ticker_close():
-    bench = _dated(_flat(100.0, last=104.0))
-    ticker = _dated(_flat(100.0, last=110.0))
-    series = ticker + (("2026-10-15", 999.0),)
-    row = scan_score.score_row("XLK", series, bench)
+    bench = _dated(_flat(100.0, last=104.0), end=date(2026, 10, 7))
+    ticker = _dated(_flat(100.0, last=110.0), end=date(2026, 10, 7))
+    series = ticker + (("2026-10-08", 999.0),)
+    row = scan_score.score_row("XLK", series, bench, asof_date=date(2026, 10, 9))
     assert row.asof == bench[-1][0]
     assert row.close == 110.0
 
@@ -545,37 +555,46 @@ def test_score_refuses_a_ticker_with_no_session_on_the_benchmark_date():
     bench = _dated(_flat(100.0, last=104.0))
     short_end = _dated(_flat(100.0, 252, last=110.0), end=date(2026, 10, 1))
     with pytest.raises(scan_score.ScoreError, match="no session on"):
-        scan_score.score_row("XLK", short_end, bench)
+        scan_score.score_row("XLK", short_end, bench, asof_date=date(2026, 10, 9))
 
 
 def test_score_refuses_fewer_than_252_sessions():
     bench = _bench()
     short_series = _dated(_flat(100.0, 251, last=110.0))
     with pytest.raises(scan_score.ScoreError, match="fewer than 252"):
-        scan_score.score_row("XLK", short_series, bench)
+        scan_score.score_row("XLK", short_series, bench, asof_date=date(2026, 10, 9))
 
 
 def test_score_accepts_exactly_252_sessions():
-    row = scan_score.score_row("XLK", _dated(_flat(100.0, 252, last=110.0)), _bench())
+    row = scan_score.score_row(
+        "XLK", _dated(_flat(100.0, 252, last=110.0)), _bench(), asof_date=date(2026, 10, 9)
+    )
     assert row.pct52w == pytest.approx(100.0)
 
 
 def test_score_refuses_constant_closes():
     with pytest.raises(scan_score.ScoreError, match="constant closes"):
-        scan_score.score_row("XLK", _dated(_flat(100.0, 252)), _bench())
+        scan_score.score_row(
+            "XLK", _dated(_flat(100.0, 252)), _bench(), asof_date=date(2026, 10, 9)
+        )
 
 
 def test_score_refuses_a_constant_window_even_if_older_closes_move():
     closes = [50.0] * 8 + [100.0] * 252
     with pytest.raises(scan_score.ScoreError, match="constant closes"):
-        scan_score.score_row("XLK", _dated(closes), _dated(_flat(100.0, 260, last=104.0)))
+        scan_score.score_row(
+            "XLK",
+            _dated(closes),
+            _dated(_flat(100.0, 260, last=104.0)),
+            asof_date=date(2026, 10, 9),
+        )
 
 
 def test_score_refuses_a_non_positive_close():
     closes = _flat(100.0, last=110.0)
     closes[10] = 0.0
     with pytest.raises(scan_score.ScoreError, match="non-positive close"):
-        scan_score.score_row("XLK", _dated(closes), _bench())
+        scan_score.score_row("XLK", _dated(closes), _bench(), asof_date=date(2026, 10, 9))
 
 
 def test_score_refuses_252_sessions_spanning_fewer_than_330_calendar_days():
@@ -586,7 +605,7 @@ def test_score_refuses_252_sessions_spanning_fewer_than_330_calendar_days():
         (end.isoformat(), 110.0)
     ]
     with pytest.raises(scan_score.ScoreError, match="spans 251 calendar days"):
-        scan_score.score_row("XLK", consecutive, _bench())
+        scan_score.score_row("XLK", consecutive, _bench(), asof_date=date(2026, 10, 9))
 
 
 def test_score_refuses_252_sessions_spanning_more_than_400_calendar_days():
@@ -596,7 +615,7 @@ def test_score_refuses_252_sessions_spanning_more_than_400_calendar_days():
         (end.isoformat(), 110.0)
     ]
     with pytest.raises(scan_score.ScoreError, match="spans 1757 calendar days"):
-        scan_score.score_row("XLK", weekly, _bench())
+        scan_score.score_row("XLK", weekly, _bench(), asof_date=date(2026, 10, 9))
 
 
 def test_require_benchmark_refuses_a_stubbed_series():
@@ -652,6 +671,15 @@ def test_build_scan_without_asof_date_raises_type_error():
         yahoo.build_scan(["XLK"], "SPY")  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         yahoo.build_scan(["XLK"], "SPY", asof_date=None)  # type: ignore[arg-type]
+
+
+def test_score_row_requires_asof_date():
+    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    ticker = _dated(_flat(100.0, 252, last=110.0), end=date(2026, 10, 7))
+    with pytest.raises(TypeError):
+        scan_score.score_row("XLK", ticker, bench)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        scan_score.score_row("XLK", ticker, bench, asof_date=None)  # type: ignore[arg-type]
 
 
 def test_build_scan_omits_a_bad_ticker_and_keeps_a_good_one():
@@ -764,6 +792,31 @@ def test_unit_run_date_session_close_never_reaches_row():
     assert row.trend == "above"
 
 
+def test_score_row_with_run_date_session_never_uses_that_close():
+    run_date = date(2026, 10, 8)
+    bench_completed = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    ticker_completed = _dated(_flat(100.0, 252, last=110.0), end=date(2026, 10, 7))
+    bench = bench_completed + (("2026-10-08", 99999.0),)
+    ticker = ticker_completed + (("2026-10-08", 88888.0),)
+    row = scan_score.score_row("XLK", ticker, bench, asof_date=run_date)
+    assert row.asof == "2026-10-07"
+    assert row.close == pytest.approx(110.0)
+    assert row.close != 88888.0
+    assert row.ret20 == pytest.approx(10.0)
+    assert row.rs20 == pytest.approx(6.0)
+
+
+def test_score_row_probe_run_date_bar_trimmed():
+    """XLK/SPY fixtures on 2026-10-08 must trim the 2026-10-08 bar."""
+    run_date = date(2026, 10, 8)
+    fixtures = _fixture_fetcher()
+    spy_series = yahoo.parse_json(fixtures("SPY"))
+    xlk_series = yahoo.parse_json(fixtures("XLK"))
+    row = scan_score.score_row("XLK", xlk_series, spy_series, asof_date=run_date)
+    assert row.asof == "2026-10-07"
+    assert row.close != pytest.approx(197.32000732421875)
+
+
 def test_unit_earlier_asof_date_ignores_later_fixture_sessions():
     fixtures = _fixture_fetcher()
     scan_clean, _ = yahoo.build_scan(
@@ -814,9 +867,9 @@ def test_build_scan_trims_ticker_series_before_scoring(monkeypatch):
     received_series: dict[str, list[tuple[str, float]]] = {}
     orig_score = yahoo.score_row
 
-    def spy_score_row(ticker, series, bench):
+    def spy_score_row(ticker, series, bench, *, asof_date):
         received_series[ticker] = list(series)
-        return orig_score(ticker, series, bench)
+        return orig_score(ticker, series, bench, asof_date=asof_date)
 
     monkeypatch.setattr(yahoo, "score_row", spy_score_row)
 

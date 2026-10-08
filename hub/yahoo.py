@@ -220,7 +220,7 @@ def build_scan(
         try:
             raw_series = parse_json(_read(canon, read))
             series = trim_series(raw_series, asof_date=asof_date)
-            rows.append(score_row(name, series, bench_series))
+            rows.append(score_row(name, series, bench_series, asof_date=asof_date))
         except (YahooError, ScoreError) as exc:
             notes.append(f"{name}: {exc}")
 

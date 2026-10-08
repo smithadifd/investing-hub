@@ -43,13 +43,21 @@ class ScoreError(Exception):
     """This close series must not become a scan row."""
 
 
-def score_row(ticker: str, series: Series, benchmark: Series) -> ScanRow:
+def score_row(
+    ticker: str,
+    series: Series,
+    benchmark: Series,
+    *,
+    asof_date: date | str,
+) -> ScanRow:
     """One ticker against the benchmark series. Raises ``ScoreError`` to omit it."""
-    if not benchmark:
-        raise ScoreError("benchmark has no sessions")
-    asof = benchmark[-1][0]
-    trimmed = _aligned(series, asof)
-    bench = _aligned(benchmark, asof)
+    if asof_date is None:
+        raise TypeError("asof_date is required")
+    series_trimmed = trim_series(series, asof_date=asof_date)
+    bench_trimmed = trim_series(benchmark, asof_date=asof_date)
+    asof = require_benchmark(bench_trimmed, asof_date=asof_date)
+    trimmed = _aligned(series_trimmed, asof)
+    bench = _aligned(bench_trimmed, asof)
     _require_window(trimmed)
     _require_window(bench)
     closes = [close for _, close in trimmed]
