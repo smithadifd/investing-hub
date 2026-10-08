@@ -28,12 +28,12 @@ Stage 1 composes the letter:
 
 This is the **port** of living-desk's gate: the same mechanical rule over the
 hub's producers (``mv-analyst``) and the local knowledge store
-(``documents``). The hub does not have a market-data rotation scan of its
-own today — a future market-data source will supply one — so the scan is an
-explicit input: ``--scan-file`` on the CLI, a documented JSON shape read by
-``load_scan_file``. With no scan source configured the market leg is **off**:
-no market finding can clear, the provenance line and the letter say so, and
-only the corpus leg can clear the gate.
+(``documents``). The scan is an explicit input. ``--scan-file`` reads the
+documented JSON shape via ``load_scan_file``. ``--scan-source yahoo`` builds
+the same ``Scan`` from daily history (see ``hub/yahoo.py`` and
+``hub/scan_score.py``). With no scan source configured the market leg is
+**off**: no market finding can clear, the provenance line and the letter say
+so, and only the corpus leg can clear the gate.
 
 Key facts:
 
@@ -711,7 +711,7 @@ def _close_view(current: dict, out: list[View]) -> None:
 
 
 def load_scan_file(path: Path | str) -> Scan:
-    """Read a rotation scan from a JSON file: the market leg's only source.
+    """Read a rotation scan from a JSON file.
 
     Shape (see README "Midweek letter")::
 

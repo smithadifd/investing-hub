@@ -21,6 +21,7 @@ from hub import (
     restore,
     session_open,
     store,
+    yahoo,
 )
 from hub.producers.common import truncate
 
@@ -750,8 +751,23 @@ def _letter_midweek_args(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help=(
             "rotation scan source as a JSON file (benchmark, asof, rows;"
-            " see README); unset means the market leg is off"
+            " see README); cannot be combined with --scan-source"
         ),
+    )
+    parser.add_argument(
+        "--scan-source",
+        choices=("yahoo",),
+        default=None,
+        help=(
+            "build the rotation and 52-week scans from Yahoo daily history"
+            " (needs --scan-benchmark); cannot be combined with --scan-file"
+        ),
+    )
+    parser.add_argument(
+        "--scan-benchmark",
+        default=None,
+        metavar="TICKER",
+        help="benchmark ticker for --scan-source yahoo",
     )
     parser.add_argument(
         "--deliver",
@@ -771,8 +787,9 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     Quiet days print one combined status line and write no file. Active
     days compose the deterministic visual and (with ``--model``) a short
     drafter summary, then write the file at ``<out-dir>/<date>-midweek.md``.
-    The market leg runs only when ``--scan-file`` names a real scan source;
-    without it the leg is off and the output says so. A no-scan rerun refuses
+    The market leg runs only when ``--scan-file`` or ``--scan-source yahoo``
+    names a real scan source; with neither, the leg is off and the output
+    says so. A no-scan rerun refuses
     to replace a scan-backed letter unless ``--force`` is set. Every run
     claims the issue date before rendering; ``--deliver`` hands the file to
     ``$HUB_LETTER_SEND_CMD`` and records the delivered findings before the
@@ -787,6 +804,13 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
             on = _date.fromisoformat(args.date)
         except ValueError:
             return _fail(name, f"invalid --date {args.date!r} (expected YYYY-MM-DD)")
+    if args.scan_file is not None and args.scan_source is not None:
+        return _fail(name, "--scan-file and --scan-source are mutually exclusive")
+    if args.scan_source == "yahoo":
+        if not args.scan_benchmark or not str(args.scan_benchmark).strip():
+            return _fail(name, "--scan-source yahoo needs --scan-benchmark")
+    elif args.scan_benchmark:
+        return _fail(name, "--scan-benchmark is only valid with --scan-source yahoo")
     asof = on.isoformat()
     out_path = args.out_dir / f"{asof}-midweek.md"
     delivery_marker = out_path.with_suffix(".delivered")
@@ -850,7 +874,8 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
                 print(f"letter already delivered: {asof}")
                 return finish(0)
 
-        if args.scan_file is None and out_path.is_file() and not args.force:
+        has_scan_source = args.scan_file is not None or args.scan_source == "yahoo"
+        if not has_scan_source and out_path.is_file() and not args.force:
             try:
                 existing = out_path.read_text(encoding="utf-8")
             except OSError as exc:
@@ -860,7 +885,7 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
                     _fail(
                         name,
                         f"refusing to overwrite scan-backed letter for {asof} without"
-                        " --scan-file; pass --force to replace it",
+                        " a scan source; pass --force to replace it",
                     )
                 )
         if not args.db.is_file():
@@ -884,15 +909,26 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         except (letter.LetterError, store.StoreError, sqlite3.Error, OSError) as exc:
             return finish(_fail(name, exc))
 
-        if args.scan_file is None:
-            scan = None
-            scan_note = "market leg off: no scan source configured"
-        else:
+        if args.scan_file is not None:
             try:
                 scan = letter.load_scan_file(args.scan_file)
             except letter.LetterError as exc:
                 return finish(_fail(name, exc))
             scan_note = f"market leg on (scan file: {args.scan_file})"
+        elif args.scan_source == "yahoo":
+            watched = sorted({ticker for view in views for ticker in view.watching})
+            try:
+                scan, omitted = yahoo.build_scan(watched, args.scan_benchmark.strip(), asof_date=on)
+            except yahoo.YahooError as exc:
+                return finish(_fail(name, exc))
+            scan_note = (
+                f"market leg on (yahoo benchmark {args.scan_benchmark.strip()} as of {scan.asof})"
+            )
+            if omitted:
+                scan_note += "; omitted " + "; ".join(omitted)
+        else:
+            scan = None
+            scan_note = "market leg off: no scan source configured"
 
         mv_candidates = producers.mv_analyst_candidates(args.mv_analyst_root).candidates
         corpus = letter.build_corpus_from_mv_analyst_candidates(mv_candidates)
