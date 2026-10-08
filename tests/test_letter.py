@@ -1128,7 +1128,7 @@ def test_cli_date_claim_blocks_non_delivery_run_before_rendering(
     assert sender_bytes == [winner_bytes]
     assert delivered_records_path.read_bytes() == memory_path.read_bytes()
     assert str(claim) in captured.err
-    assert "in progress or was interrupted" in captured.err
+    assert "another run for 2026-02-10 holds the date claim" in captured.err
     assert len(renders) == 1
 
 
