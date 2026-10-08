@@ -80,36 +80,34 @@ def score_row(ticker: str, series: Series, benchmark: Series) -> ScanRow:
     )
 
 
-def trim_series(
-    series: Series, asof_date: date | str | None = None
-) -> tuple[tuple[str, float], ...]:
+def trim_series(series: Series, asof_date: date | str) -> tuple[tuple[str, float], ...]:
     """Trim a series to completed sessions dated strictly before the run date."""
     if asof_date is None:
-        return tuple(series)
+        raise TypeError("asof_date is required")
     target = (
         date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
     ).isoformat()
     return tuple((day, close) for day, close in series if day < target)
 
 
-def require_benchmark(series: Series, asof_date: date | str | None = None) -> str:
+def require_benchmark(series: Series, asof_date: date | str) -> str:
     """Refuse a benchmark that cannot anchor relative strength. Returns its as-of date."""
+    if asof_date is None:
+        raise TypeError("asof_date is required")
     if not series:
         raise ScoreError("no sessions")
     asof = series[-1][0]
     trimmed = _aligned(series, asof)
     _require_window(trimmed)
-    if asof_date is not None:
-        target = date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
-        bench_d = date.fromisoformat(asof)
-        assert bench_d < target, (
-            f"benchmark session {asof} is not strictly before {target.isoformat()}"
+    target = date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
+    bench_d = date.fromisoformat(asof)
+    if bench_d >= target:
+        raise ScoreError(f"benchmark session {asof} is not strictly before {target.isoformat()}")
+    days = (target - bench_d).days
+    if days > 7:
+        raise ScoreError(
+            f"stale history ({asof} is {days} calendar days before {target.isoformat()})"
         )
-        days = (target - bench_d).days
-        if days > 7:
-            raise ScoreError(
-                f"stale history ({asof} is {days} calendar days before {target.isoformat()})"
-            )
     return asof
 
 

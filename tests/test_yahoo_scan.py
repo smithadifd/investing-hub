@@ -601,9 +601,13 @@ def test_score_refuses_252_sessions_spanning_more_than_400_calendar_days():
 
 def test_require_benchmark_refuses_a_stubbed_series():
     with pytest.raises(scan_score.ScoreError, match="constant closes"):
-        scan_score.require_benchmark(_dated(_flat(100.0, 252)))
+        scan_score.require_benchmark(
+            _dated(_flat(100.0, 252), end=date(2026, 10, 7)), asof_date=date(2026, 10, 8)
+        )
     with pytest.raises(scan_score.ScoreError, match="fewer than 252"):
-        scan_score.require_benchmark(_dated(_flat(100.0, 10)))
+        scan_score.require_benchmark(
+            _dated(_flat(100.0, 10), end=date(2026, 10, 7)), asof_date=date(2026, 10, 8)
+        )
 
 
 def test_require_benchmark_refuses_stale_history_more_than_7_days_before_date():
@@ -620,10 +624,34 @@ def test_require_benchmark_accepts_session_within_7_days_before_date():
 def test_require_benchmark_defends_against_untrimmed_run_date_session():
     bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 8))
     with pytest.raises(
-        AssertionError,
+        scan_score.ScoreError,
         match="benchmark session 2026-10-08 is not strictly before 2026-10-08",
     ):
         scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8))
+
+
+def test_require_benchmark_refuses_session_after_run_date():
+    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 9))
+    with pytest.raises(
+        scan_score.ScoreError,
+        match="benchmark session 2026-10-09 is not strictly before 2026-10-08",
+    ):
+        scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8))
+
+
+def test_require_benchmark_requires_asof_date():
+    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    with pytest.raises(TypeError):
+        scan_score.require_benchmark(bench)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        scan_score.require_benchmark(bench, asof_date=None)  # type: ignore[arg-type]
+
+
+def test_build_scan_without_asof_date_raises_type_error():
+    with pytest.raises(TypeError):
+        yahoo.build_scan(["XLK"], "SPY")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        yahoo.build_scan(["XLK"], "SPY", asof_date=None)  # type: ignore[arg-type]
 
 
 def test_build_scan_omits_a_bad_ticker_and_keeps_a_good_one():
@@ -634,7 +662,9 @@ def test_build_scan_omits_a_bad_ticker_and_keeps_a_good_one():
     def fetch(symbol: str) -> str:
         return {"SPY": bench, "XLK": good, "QQQ": short}[symbol]
 
-    scan, notes = yahoo.build_scan(["XLK", "QQQ"], "SPY", fetcher=fetch)
+    scan, notes = yahoo.build_scan(
+        ["XLK", "QQQ"], "SPY", fetcher=fetch, asof_date=date(2026, 10, 9)
+    )
     assert [row.ticker for row in scan.rows] == ["XLK"]
     assert any("QQQ" in note for note in notes)
 
@@ -646,7 +676,7 @@ def test_build_scan_refuses_a_stubbed_benchmark():
         return constant
 
     with pytest.raises(yahoo.YahooError, match="refusing scan: benchmark SPY: constant closes"):
-        yahoo.build_scan(["XLK"], "SPY", fetcher=fetch)
+        yahoo.build_scan(["XLK"], "SPY", fetcher=fetch, asof_date=date(2026, 10, 9))
 
 
 def test_build_scan_refuses_when_the_benchmark_fetch_fails():
@@ -654,7 +684,7 @@ def test_build_scan_refuses_when_the_benchmark_fetch_fails():
         raise yahoo.YahooError("HTTP 503")
 
     with pytest.raises(yahoo.YahooError, match="refusing scan: benchmark SPY: HTTP 503"):
-        yahoo.build_scan(["XLK"], "SPY", fetcher=fetch)
+        yahoo.build_scan(["XLK"], "SPY", fetcher=fetch, asof_date=date(2026, 10, 9))
 
 
 def test_build_scan_refuses_stale_benchmark():
@@ -676,14 +706,16 @@ def test_build_scan_case_insensitive_benchmark_exclusion():
         return text
 
     # View watching "SPY" with --scan-benchmark "spy"
-    scan, notes = yahoo.build_scan(["SPY", "XLK"], "spy", fetcher=fetch)
+    scan, notes = yahoo.build_scan(
+        ["SPY", "XLK"], "spy", fetcher=fetch, asof_date=date(2026, 10, 9)
+    )
     # Neither fetches SPY twice nor emits SPY as a row
     assert fetched_symbols == ["SPY", "XLK"]
     assert [row.ticker for row in scan.rows] == ["XLK"]
 
     # Also deduplicates tickers and preserves display spelling
     fetched_symbols.clear()
-    scan2, _ = yahoo.build_scan(["XLK", "xlk"], "SPY", fetcher=fetch)
+    scan2, _ = yahoo.build_scan(["XLK", "xlk"], "SPY", fetcher=fetch, asof_date=date(2026, 10, 9))
     assert fetched_symbols == ["SPY", "XLK"]
     assert [row.ticker for row in scan2.rows] == ["XLK"]
 
@@ -697,7 +729,16 @@ def test_trim_series_excludes_sessions_on_and_after_asof_date():
     )
     trimmed = scan_score.trim_series(series, asof_date=date(2026, 10, 8))
     assert trimmed == (("2026-10-06", 100.0), ("2026-10-07", 101.0))
-    assert scan_score.trim_series(series, asof_date=None) == series
+    with pytest.raises(TypeError):
+        scan_score.trim_series(series, asof_date=None)  # type: ignore[arg-type]
+
+
+def test_trim_series_requires_asof_date():
+    series = (("2026-10-07", 100.0),)
+    with pytest.raises(TypeError):
+        scan_score.trim_series(series)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        scan_score.trim_series(series, asof_date=None)  # type: ignore[arg-type]
 
 
 def test_unit_run_date_session_close_never_reaches_row():

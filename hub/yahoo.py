@@ -172,8 +172,8 @@ def build_scan(
     tickers: Sequence[str],
     benchmark: str,
     *,
+    asof_date: date | str,
     fetcher: Callable[[str], str] | None = None,
-    asof_date: date | str | None = None,
 ) -> tuple[Scan, tuple[str, ...]]:
     """Fetch the benchmark and each watched ticker, score what is usable.
 
@@ -182,6 +182,8 @@ def build_scan(
     graded against a missing or stubbed relative-strength base. The benchmark
     is not itself a row.
     """
+    if asof_date is None:
+        raise TypeError("asof_date is required")
     read = fetcher or fetch_json
     bench_name = benchmark.strip()
     if not bench_name:
