@@ -1018,56 +1018,61 @@ def test_cli_failed_delivery_leaves_memory_unchanged_then_retry_delivers(
     assert first["verdict"] in ("confirms", "contradicts", "extends")
 
 
-def test_cli_delivery_claim_blocks_a_second_run_before_rendering(
+def test_cli_date_claim_blocks_non_delivery_run_before_rendering(
     db, letter_roots, tmp_path, monkeypatch, capsys
 ):
     body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
     _seed_thesis_doc(db, body)
-    claim = tmp_path / "out" / "2026-02-10-midweek.delivering"
+    letter_path = tmp_path / "out" / "2026-02-10-midweek.md"
+    claim = letter_path.with_suffix(".delivering")
+    asks_path = letter_path.with_suffix(".asks.json")
+    delivered_records_path = letter_path.with_suffix(".delivered.jsonl")
     memory_path = tmp_path / "memory.jsonl"
     renders = []
-    sends = []
-    second_run = {}
+    sender_bytes = []
+    loser = {}
     real_write_letter = letter.write_letter
 
     def tracking_writer(*args, **kwargs):
         renders.append(1)
         return real_write_letter(*args, **kwargs)
 
-    def nested_sender(path, *, subject):
-        sends.append((path, subject))
-        if len(sends) == 1:
-            winner_bytes = path.read_bytes()
-            second_run["rc"] = main(cli_args)
-            second_run["letter_bytes"] = path.read_bytes()
-            second_run["memory_exists"] = memory_path.exists()
-            assert path.read_bytes() == winner_bytes
+    def paused_sender(path, *, subject):
+        sender_bytes.append(path.read_bytes())
+        loser["rc"] = main(loser_args)
+        loser["letter_bytes"] = path.read_bytes()
+        loser["asks_exists"] = asks_path.exists()
+        loser["memory_exists"] = memory_path.exists()
         return "sent"
 
     monkeypatch.setattr(letter, "write_letter", tracking_writer)
-    monkeypatch.setattr(letter, "default_sender", nested_sender)
-    cli_args = _letter_args(
+    monkeypatch.setattr(letter, "default_sender", paused_sender)
+    winner_args = _letter_args(
         db,
         tmp_path,
         letter_roots,
         scan_file=SCAN_FILE,
         extra=["--deliver"],
     )
+    loser_args = _letter_args(db, tmp_path, letter_roots, extra=["--force"])
 
-    assert main(cli_args) == 0
+    assert main(winner_args) == 0
     captured = capsys.readouterr()
-    assert second_run == {
+    winner_bytes = letter_path.read_bytes()
+    assert loser == {
         "rc": 1,
-        "letter_bytes": (tmp_path / "out" / "2026-02-10-midweek.md").read_bytes(),
+        "letter_bytes": winner_bytes,
+        "asks_exists": False,
         "memory_exists": False,
     }
+    assert sender_bytes == [winner_bytes]
+    assert delivered_records_path.read_bytes() == memory_path.read_bytes()
     assert str(claim) in captured.err
     assert "in progress or was interrupted" in captured.err
     assert len(renders) == 1
-    assert len(sends) == 1
 
 
-def test_cli_delivery_claim_exists_before_rendering(
+def test_cli_date_claim_exists_before_non_delivery_rendering(
     db, letter_roots, tmp_path, monkeypatch, capsys
 ):
     body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
@@ -1076,11 +1081,10 @@ def test_cli_delivery_claim_exists_before_rendering(
     real_write_letter = letter.write_letter
 
     def checking_writer(*args, **kwargs):
-        assert claim.exists(), "delivery claim must exist before rendering"
+        assert claim.exists(), "date claim must exist before rendering a non-delivery"
         return real_write_letter(*args, **kwargs)
 
     monkeypatch.setattr(letter, "write_letter", checking_writer)
-    monkeypatch.setattr(letter, "default_sender", lambda path, *, subject: "sent")
 
     assert (
         main(
@@ -1089,12 +1093,12 @@ def test_cli_delivery_claim_exists_before_rendering(
                 tmp_path,
                 letter_roots,
                 scan_file=SCAN_FILE,
-                extra=["--deliver"],
             )
         )
         == 0
     )
     capsys.readouterr()
+    assert not claim.exists()
 
 
 def test_cli_sender_failure_releases_claim_for_one_retry(
@@ -1217,6 +1221,23 @@ def test_cli_delivered_rerun_repairs_memory_from_sidecar_after_inputs_change(
     assert capsys.readouterr().out.strip() == "letter already delivered: 2026-02-10"
     assert memory_path.read_bytes() == repaired
     assert len(sends) == 1
+
+
+def test_cli_non_delivery_does_not_run_delivery_marker_recovery(db, letter_roots, tmp_path, capsys):
+    body = (VIEWS_DIR / "views-0.md").read_text(encoding="utf-8")
+    _seed_thesis_doc(db, body)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "2026-02-10-midweek.delivered").write_text("2026-02-10\n", encoding="utf-8")
+
+    assert main(_letter_args(db, tmp_path, letter_roots, scan_file=SCAN_FILE)) == 0
+    captured = capsys.readouterr()
+    assert "letter written:" in captured.out
+    assert captured.err == ""
+    assert (out_dir / "2026-02-10-midweek.md").is_file()
+    records = letter.load_memory(tmp_path / "memory.jsonl")
+    assert records
+    assert {record.date for record in records} == {"2026-02-10"}
 
 
 def test_cli_delivered_rerun_refuses_missing_findings_sidecar_without_writing(

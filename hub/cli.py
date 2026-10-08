@@ -773,9 +773,9 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
     drafter summary, then write the file at ``<out-dir>/<date>-midweek.md``.
     The market leg runs only when ``--scan-file`` names a real scan source;
     without it the leg is off and the output says so. A no-scan rerun refuses
-    to replace a scan-backed letter unless ``--force`` is set. ``--deliver``
-    claims the issue date before rendering, hands the file to
-    ``$HUB_LETTER_SEND_CMD``, and records the delivered findings before the
+    to replace a scan-backed letter unless ``--force`` is set. Every run
+    claims the issue date before rendering; ``--deliver`` hands the file to
+    ``$HUB_LETTER_SEND_CMD`` and records the delivered findings before the
     delivery marker. An interrupted delivery leaves a claim file and needs a
     manual inbox check before retrying; it never resends on its own.
     """
@@ -809,21 +809,23 @@ def cmd_letter_midweek(args: argparse.Namespace) -> int:
         claim_taken = False
         return rc
 
-    if args.deliver:
-        try:
-            args.out_dir.mkdir(parents=True, exist_ok=True)
-            claim_fd = os.open(delivery_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            return _fail(
-                name,
-                f"{delivery_claim}: delivery for {asof} is in progress or was interrupted "
-                "(remove the claim after checking the inbox to retry)",
-            )
-        except OSError as exc:
-            return _fail(name, exc)
-        os.close(claim_fd)
-        claim_taken = True
+    # For a given date, only the claim holder may render or write sidecars,
+    # deliver the letter, or append its memory.
+    try:
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        claim_fd = os.open(delivery_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return _fail(
+            name,
+            f"{delivery_claim}: delivery for {asof} is in progress or was interrupted "
+            "(remove the claim after checking the inbox to retry)",
+        )
+    except OSError as exc:
+        return _fail(name, exc)
+    os.close(claim_fd)
+    claim_taken = True
 
+    if args.deliver:
         if delivery_marker.is_file():
             try:
                 if not delivered_records_path.is_file():
