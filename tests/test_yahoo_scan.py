@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -74,6 +75,29 @@ def _json(closes: list[float], *, end: date = date(2026, 10, 8)) -> str:
     timestamps = [
         int(datetime(d.year, d.month, d.day, 13, 30, tzinfo=UTC).timestamp()) for d in days
     ]
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "timestamp": timestamps,
+                    "indicators": {
+                        "quote": [
+                            {
+                                "close": closes,
+                            }
+                        ]
+                    },
+                }
+            ],
+            "error": None,
+        }
+    }
+    return json.dumps(payload)
+
+
+def _json_from_dated(series: Sequence[tuple[str, float]]) -> str:
+    timestamps = [int(datetime.fromisoformat(f"{d}T13:30:00+00:00").timestamp()) for d, _ in series]
+    closes = [close for _, close in series]
     payload = {
         "chart": {
             "result": [
@@ -593,6 +617,15 @@ def test_require_benchmark_accepts_session_within_7_days_before_date():
     assert scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8)) == "2026-10-01"
 
 
+def test_require_benchmark_defends_against_untrimmed_run_date_session():
+    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 8))
+    with pytest.raises(
+        AssertionError,
+        match="benchmark session 2026-10-08 is not strictly before 2026-10-08",
+    ):
+        scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8))
+
+
 def test_build_scan_omits_a_bad_ticker_and_keeps_a_good_one():
     good = _json(_flat(100.0, 252, last=110.0))
     short = _json(_flat(100.0, 10, last=110.0))
@@ -655,6 +688,107 @@ def test_build_scan_case_insensitive_benchmark_exclusion():
     assert [row.ticker for row in scan2.rows] == ["XLK"]
 
 
+def test_trim_series_excludes_sessions_on_and_after_asof_date():
+    series = (
+        ("2026-10-06", 100.0),
+        ("2026-10-07", 101.0),
+        ("2026-10-08", 102.0),
+        ("2026-10-09", 103.0),
+    )
+    trimmed = scan_score.trim_series(series, asof_date=date(2026, 10, 8))
+    assert trimmed == (("2026-10-06", 100.0), ("2026-10-07", 101.0))
+    assert scan_score.trim_series(series, asof_date=None) == series
+
+
+def test_unit_run_date_session_close_never_reaches_row():
+    run_date = date(2026, 10, 8)
+    bench_completed = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    ticker_completed = _dated(_flat(100.0, 252, last=110.0), end=date(2026, 10, 7))
+    bench_payload = _json_from_dated(bench_completed + (("2026-10-08", 99999.0),))
+    ticker_payload = _json_from_dated(ticker_completed + (("2026-10-08", 88888.0),))
+
+    def fetch(symbol: str) -> str:
+        return ticker_payload if symbol == "XLK" else bench_payload
+
+    scan, notes = yahoo.build_scan(["XLK"], "SPY", fetcher=fetch, asof_date=run_date)
+    assert notes == ()
+    assert scan.asof == "2026-10-07"
+    assert len(scan.rows) == 1
+    row = scan.rows[0]
+    assert row.asof == "2026-10-07"
+    assert row.close == pytest.approx(110.0)
+    assert row.close != 88888.0
+    assert row.ret20 == pytest.approx(10.0)
+    assert row.rs20 == pytest.approx(6.0)
+    assert row.trend == "above"
+
+
+def test_unit_earlier_asof_date_ignores_later_fixture_sessions():
+    fixtures = _fixture_fetcher()
+    scan_clean, _ = yahoo.build_scan(
+        ["XLK", "XLF", "XLE"], "SPY", fetcher=fixtures, asof_date=date(2026, 10, 1)
+    )
+    assert scan_clean.asof <= "2026-09-30"
+    assert scan_clean.asof == "2026-09-30"
+    for row in scan_clean.rows:
+        assert row.asof == "2026-09-30"
+
+    def corrupted_fetcher(symbol: str) -> str:
+        raw = fixtures(symbol)
+        d = json.loads(raw)
+        timestamps = d["chart"]["result"][0]["timestamp"]
+        closes = d["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        new_closes = []
+        for ts, close in zip(timestamps, closes, strict=True):
+            dt = datetime.fromtimestamp(ts, UTC).date()
+            if dt >= date(2026, 10, 1):
+                new_closes.append(999999.0)
+            else:
+                new_closes.append(close)
+        d["chart"]["result"][0]["indicators"]["quote"][0]["close"] = new_closes
+        return json.dumps(d)
+
+    scan_corrupted, _ = yahoo.build_scan(
+        ["XLK", "XLF", "XLE"], "SPY", fetcher=corrupted_fetcher, asof_date=date(2026, 10, 1)
+    )
+    assert scan_corrupted.asof == scan_clean.asof
+    assert len(scan_corrupted.rows) == len(scan_clean.rows)
+    for row_corr, row_clean in zip(scan_corrupted.rows, scan_clean.rows, strict=True):
+        assert row_corr.ticker == row_clean.ticker
+        assert row_corr.asof == row_clean.asof
+        assert row_corr.close == row_clean.close
+        assert row_corr.ret20 == row_clean.ret20
+        assert row_corr.rs20 == row_clean.rs20
+        assert row_corr.pct52w == row_clean.pct52w
+        assert row_corr.trend == row_clean.trend
+
+
+def test_build_scan_trims_ticker_series_before_scoring(monkeypatch):
+    run_date = date(2026, 10, 8)
+    bench_completed = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    ticker_completed = _dated(_flat(100.0, 252, last=110.0), end=date(2026, 10, 7))
+    bench_payload = _json_from_dated(bench_completed + (("2026-10-08", 99999.0),))
+    ticker_payload = _json_from_dated(ticker_completed + (("2026-10-08", 88888.0),))
+
+    received_series: dict[str, list[tuple[str, float]]] = {}
+    orig_score = yahoo.score_row
+
+    def spy_score_row(ticker, series, bench):
+        received_series[ticker] = list(series)
+        return orig_score(ticker, series, bench)
+
+    monkeypatch.setattr(yahoo, "score_row", spy_score_row)
+
+    def fetch(symbol: str) -> str:
+        return ticker_payload if symbol == "XLK" else bench_payload
+
+    yahoo.build_scan(["XLK"], "SPY", fetcher=fetch, asof_date=run_date)
+
+    assert "XLK" in received_series
+    assert all(day < run_date.isoformat() for day, _ in received_series["XLK"])
+    assert not any(day == "2026-10-08" for day, _ in received_series["XLK"])
+
+
 def _closes_from_json(text: str) -> list[float]:
     d = json.loads(text)
     return d["chart"]["result"][0]["indicators"]["quote"][0]["close"]
@@ -677,8 +811,8 @@ def test_cli_yahoo_fills_rotation_and_52w_in_the_letter(db, tmp_path, monkeypatc
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "market leg on (yahoo benchmark SPY as of 2026-10-08)" in out
-    assert "findings=3" in out
+    assert "market leg on (yahoo benchmark SPY as of 2026-10-07)" in out
+    assert "findings=2" in out
 
     out_file = tmp_path / "out" / "2026-10-08-midweek.md"
     assert out_file.is_file()
@@ -686,10 +820,10 @@ def test_cli_yahoo_fills_rotation_and_52w_in_the_letter(db, tmp_path, monkeypatc
     assert "rs20 (pp)" in text
     assert "52w track" in text
 
-    spy = _closes_from_json((FIXTURES / "spy.json").read_text(encoding="utf-8"))
-    xlk = _closes_from_json((FIXTURES / "xlk.json").read_text(encoding="utf-8"))
-    xlf = _closes_from_json((FIXTURES / "xlf.json").read_text(encoding="utf-8"))
-    xle = _closes_from_json((FIXTURES / "xle.json").read_text(encoding="utf-8"))
+    spy = _closes_from_json((FIXTURES / "spy.json").read_text(encoding="utf-8"))[:-1]
+    xlk = _closes_from_json((FIXTURES / "xlk.json").read_text(encoding="utf-8"))[:-1]
+    xlf = _closes_from_json((FIXTURES / "xlf.json").read_text(encoding="utf-8"))[:-1]
+    xle = _closes_from_json((FIXTURES / "xle.json").read_text(encoding="utf-8"))[:-1]
 
     xlk_rs20 = (xlk[-1] / xlk[-21] - 1.0) * 100.0 - (spy[-1] / spy[-21] - 1.0) * 100.0
     xlf_pct = (xlf[-1] - min(xlf[-252:])) / (max(xlf[-252:]) - min(xlf[-252:])) * 100.0
@@ -703,8 +837,9 @@ def test_cli_yahoo_fills_rotation_and_52w_in_the_letter(db, tmp_path, monkeypatc
     assert f"{xle_pct:5.0f}" in xle_line
     assert "**XLK confirms**" in text
     assert "**XLF confirms**" in text
-    assert "**XLE extends**" in text
+    assert "**XLE extends**" not in text
     assert "SPY" not in xlk_line
+    assert "2026-10-07" in text
 
 
 def test_cli_no_scan_source_market_leg_stays_off(db, tmp_path, capsys):
@@ -775,7 +910,7 @@ def test_cli_omits_a_bad_ticker_instead_of_defaulting(
     payloads = {
         "empty": "   ",
         "html": "<html><body>blocked</body></html>",
-        "flat": _json(_flat(100.0, 252)),
+        "flat": _json(_flat(100.0, 260)),
     }
 
     def fetch(symbol: str) -> str:

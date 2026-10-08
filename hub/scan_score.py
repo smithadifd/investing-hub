@@ -80,6 +80,18 @@ def score_row(ticker: str, series: Series, benchmark: Series) -> ScanRow:
     )
 
 
+def trim_series(
+    series: Series, asof_date: date | str | None = None
+) -> tuple[tuple[str, float], ...]:
+    """Trim a series to completed sessions dated strictly before the run date."""
+    if asof_date is None:
+        return tuple(series)
+    target = (
+        date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
+    ).isoformat()
+    return tuple((day, close) for day, close in series if day < target)
+
+
 def require_benchmark(series: Series, asof_date: date | str | None = None) -> str:
     """Refuse a benchmark that cannot anchor relative strength. Returns its as-of date."""
     if not series:
@@ -90,6 +102,9 @@ def require_benchmark(series: Series, asof_date: date | str | None = None) -> st
     if asof_date is not None:
         target = date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
         bench_d = date.fromisoformat(asof)
+        assert bench_d < target, (
+            f"benchmark session {asof} is not strictly before {target.isoformat()}"
+        )
         days = (target - bench_d).days
         if days > 7:
             raise ScoreError(

@@ -73,11 +73,11 @@ beats corpus from mv-analyst, and a market leg. Views are parsed from thesis doc
 `--scan-source yahoo` builds that same scan from Yahoo's daily history
 (`https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=2y&interval=1d`).
 It needs `--scan-benchmark TICKER` and fetches the benchmark plus every ticker
-the views watch. Scoring uses closes only: the 20- and 60-session return,
-relative strength versus the benchmark in percentage points, where the close
-sits in the trailing 252-session range (`pct52w`), the 200-session average,
-whether the close is above or below that average, and whether it crossed the
-average on the latest session.
+the views watch. The scan uses completed sessions before the run date. Scoring
+uses closes only: the 20- and 60-session return, relative strength versus the
+benchmark in percentage points, where the close sits in the trailing 252-session
+range (`pct52w`), the 200-session average, whether the close is above or below
+that average, and whether it crossed the average on the latest session.
 
 A ticker is left out of the scan, with a note on the status line, when its
 history is shorter than 252 sessions, its 252-session window does not span

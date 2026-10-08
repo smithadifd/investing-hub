@@ -10,3 +10,7 @@ Each response is trimmed only by removing fields the reader never reads
 (`indicators.adjclose`, `indicators.quote[0].open`, `high`, `low`, `volume`,
 and `meta`). The `timestamp` and `indicators.quote[0].close` arrays are preserved
 verbatim as returned by the live endpoint.
+
+The last bar in each fixture was captured during the 2026-10-08 session and is
+not a completed close; the reader excludes run-date sessions and scores only
+completed sessions dated strictly before the run date.

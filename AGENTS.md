@@ -129,7 +129,8 @@ Sources feed a sweep that scores findings deterministically, then drafts a brief
 threshold. The operator's answer opens an advisor session seeded with the brief. The hub reads IC
 through its API; the session writes changes back itself with `hub ic` verbs.
 See `ROADMAP.md` for the diagram. Make every IC change through a `hub ic` verb, never by calling
-IC's write API by hand, so it is logged, receipted and revertible.
+IC's write API by hand, so it is logged, receipted and revertible. The scan uses completed sessions
+before the run date.
 
 ## Writing to IC
 

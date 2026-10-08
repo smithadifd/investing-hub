@@ -22,7 +22,13 @@ from datetime import UTC, date, datetime
 from urllib.parse import quote
 
 from hub.letter import Scan
-from hub.scan_score import ScoreError, require_benchmark, scan_from_rows, score_row
+from hub.scan_score import (
+    ScoreError,
+    require_benchmark,
+    scan_from_rows,
+    score_row,
+    trim_series,
+)
 
 TIMEOUT_SECONDS = 20.0
 MAX_BYTES = 5_000_000
@@ -167,7 +173,7 @@ def build_scan(
     benchmark: str,
     *,
     fetcher: Callable[[str], str] | None = None,
-    asof_date: date | None = None,
+    asof_date: date | str | None = None,
 ) -> tuple[Scan, tuple[str, ...]]:
     """Fetch the benchmark and each watched ticker, score what is usable.
 
@@ -186,7 +192,8 @@ def build_scan(
         raise YahooError(f"refusing scan: benchmark {bench_name}: {exc}") from None
 
     try:
-        bench_series = parse_json(_read(bench_symbol, read))
+        raw_bench = parse_json(_read(bench_symbol, read))
+        bench_series = trim_series(raw_bench, asof_date=asof_date)
         asof = require_benchmark(bench_series, asof_date=asof_date)
     except (YahooError, ScoreError) as exc:
         raise YahooError(f"refusing scan: benchmark {bench_name}: {exc}") from None
@@ -209,7 +216,8 @@ def build_scan(
             continue
         seen_symbols.add(canon)
         try:
-            series = parse_json(_read(canon, read))
+            raw_series = parse_json(_read(canon, read))
+            series = trim_series(raw_series, asof_date=asof_date)
             rows.append(score_row(name, series, bench_series))
         except (YahooError, ScoreError) as exc:
             notes.append(f"{name}: {exc}")
