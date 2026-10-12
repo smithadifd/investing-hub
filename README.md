@@ -52,8 +52,10 @@ with the snapshot so `hub custodian list` reuses them when counting data rows.
 ### Midweek letter
 
 `hub letter midweek` grades the thesis documents in the store against two legs of evidence: the
-beats corpus from mv-analyst, and a rotation scan supplied with `--scan-file` (views are parsed
-from thesis document bodies; see `hub/letter.py` for the views shape). The scan is a JSON file:
+beats corpus from mv-analyst, and a market leg. Views are parsed from thesis document bodies; see
+`hub/letter.py` for the views shape. The market leg stays off unless you name a source.
+
+`--scan-file` reads a JSON scan:
 
 ```json
 {
@@ -66,11 +68,32 @@ from thesis document bodies; see `hub/letter.py` for the views shape). The scan 
 ```
 
 `ticker` and `close` are required in each row; `ret20`, `ret60`, `rs20`, `rs60`, `pct52w`,
-`sma200`, `trend`, `crossed` and the row's own `asof` are optional. Without `--scan-file` the
-market leg is off — the output says "market leg off: no scan source configured" and only the
-corpus leg can clear the gate. A no-scan rerun refuses to replace that date's scan-backed letter
-unless `--force` is given. A quiet week prints one status line and writes no file. `--deliver`
-hands the written letter to the command in `HUB_LETTER_SEND_CMD` (unset means a clear refusal).
+`sma200`, `trend`, `crossed` and the row's own `asof` are optional.
+
+`--scan-source yahoo` builds that same scan from Yahoo's daily history
+(`https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=2y&interval=1d`).
+It needs `--scan-benchmark TICKER` and fetches the benchmark plus every ticker
+the views watch. The scan uses completed sessions before the run date. Scoring
+uses closes only: the 20- and 60-session return, relative strength versus the
+benchmark in percentage points, where the close sits in the trailing 252-session
+range (`pct52w`), the 200-session average, whether the close is above or below
+that average, and whether it crossed the average on the latest session.
+
+A ticker is left out of the scan, with a note on the status line, when its
+history is shorter than 252 sessions, its 252-session window does not span
+~330 to ~400 calendar days, the closes in that window do not move, a close is
+not a positive number, the JSON is empty or malformed, Yahoo returns an error,
+or the fetch fails. No stand-in number is written in its place. If the
+benchmark itself fails any of those checks or its latest session is more than 7
+calendar days before the run date, the command refuses and writes no letter.
+`--scan-file` and `--scan-source` cannot be combined. `--scan-benchmark` is
+only valid with the Yahoo source.
+
+Without either source the market leg is off — the output says "market leg off: no scan source
+configured" and only the corpus leg can clear the gate. A no-scan rerun refuses to replace that
+date's scan-backed letter unless `--force` is given. A quiet week prints one status line and
+writes no file. `--deliver` hands the written letter to the command in `HUB_LETTER_SEND_CMD`
+(unset means a clear refusal).
 A successful delivery is marked per issue date, so rerunning `--deliver` does not send twice; the
 repo itself schedules nothing and sends nothing.
 
