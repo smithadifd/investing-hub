@@ -70,6 +70,29 @@ def _bench(last: float = 104.0) -> tuple[tuple[str, float], ...]:
     return _dated(_flat(100.0, last=last))
 
 
+def _malformed_series(fault: str) -> tuple[tuple[str, float], ...]:
+    rows = list(_dated(_flat(100.0, 252, last=110.0), end=date(2026, 10, 7)))
+    if fault == "duplicate":
+        rows[100] = (rows[99][0], rows[100][1])
+    elif fault == "reversed":
+        rows[100], rows[101] = rows[101], rows[100]
+    elif fault == "invalid":
+        rows[100] = ("2026-02-30", rows[100][1])
+    else:
+        raise ValueError(f"unknown fault: {fault}")
+    return tuple(rows)
+
+
+def _date_representation(day: date, representation: str) -> date | datetime | str:
+    if representation == "date":
+        return day
+    if representation == "datetime":
+        return datetime(day.year, day.month, day.day, 17, 30)
+    if representation == "str":
+        return day.isoformat()
+    raise ValueError(f"unknown representation: {representation}")
+
+
 def _json(closes: list[float], *, end: date = date(2026, 10, 8)) -> str:
     days = _weekdays(len(closes), end=end)
     timestamps = [
@@ -640,22 +663,47 @@ def test_require_benchmark_accepts_session_within_7_days_before_date():
     assert scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8)) == "2026-10-01"
 
 
-def test_require_benchmark_defends_against_untrimmed_run_date_session():
-    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 8))
-    with pytest.raises(
-        scan_score.ScoreError,
-        match="benchmark session 2026-10-08 is not strictly before 2026-10-08",
-    ):
-        scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8))
+def test_require_benchmark_excludes_a_run_date_session():
+    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    bench += (("2026-10-08", 999.0),)
+    assert scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8)) == "2026-10-07"
 
 
-def test_require_benchmark_refuses_session_after_run_date():
-    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 9))
-    with pytest.raises(
-        scan_score.ScoreError,
-        match="benchmark session 2026-10-09 is not strictly before 2026-10-08",
-    ):
-        scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8))
+def test_require_benchmark_excludes_sessions_after_the_run_date():
+    bench = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    bench += (("2026-10-08", 998.0), ("2026-10-09", 999.0))
+    assert scan_score.require_benchmark(bench, asof_date=date(2026, 10, 8)) == "2026-10-07"
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    ["score_row_ticker", "score_row_benchmark", "trim_series", "require_benchmark"],
+)
+@pytest.mark.parametrize(
+    ("fault", "match"),
+    [
+        ("duplicate", "series index 100 duplicates date"),
+        ("reversed", "series index 101 date .* is not after"),
+        ("invalid", "series index 100 has invalid date '2026-02-30'"),
+    ],
+)
+def test_public_series_requires_strict_unique_dates(entry_point, fault, match):
+    malformed = _malformed_series(fault)
+    valid = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    with pytest.raises(scan_score.ScoreError, match=match):
+        if entry_point == "score_row_ticker":
+            scan_score.score_row("XLK", malformed, valid, asof_date=date(2026, 10, 8))
+        elif entry_point == "score_row_benchmark":
+            scan_score.score_row("XLK", valid, malformed, asof_date=date(2026, 10, 8))
+        elif entry_point == "trim_series":
+            scan_score.trim_series(malformed, asof_date=date(2026, 10, 8))
+        else:
+            scan_score.require_benchmark(malformed, asof_date=date(2026, 10, 8))
+
+
+def test_require_window_counts_only_validated_unique_sessions():
+    with pytest.raises(scan_score.ScoreError, match="series index 100 duplicates date"):
+        scan_score._require_window(_malformed_series("duplicate"))
 
 
 def test_require_benchmark_requires_asof_date():
@@ -767,6 +815,26 @@ def test_trim_series_requires_asof_date():
         scan_score.trim_series(series)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         scan_score.trim_series(series, asof_date=None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("run_representation", ["date", "datetime", "str"])
+@pytest.mark.parametrize("bar_representation", ["date", "datetime", "str"])
+def test_trim_series_excludes_run_date_for_all_supported_date_inputs(
+    run_representation, bar_representation
+):
+    series = tuple(
+        (
+            _date_representation(day, bar_representation),
+            close,
+        )
+        for day, close in (
+            (date(2026, 10, 7), 101.0),
+            (date(2026, 10, 8), 102.0),
+            (date(2026, 10, 9), 103.0),
+        )
+    )
+    run_date = _date_representation(date(2026, 10, 8), run_representation)
+    assert scan_score.trim_series(series, asof_date=run_date) == (("2026-10-07", 101.0),)
 
 
 def test_unit_run_date_session_close_never_reaches_row():

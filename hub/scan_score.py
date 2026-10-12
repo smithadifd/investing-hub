@@ -23,7 +23,7 @@ Definitions, all on sessions aligned to the benchmark's latest date:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 
 from hub.letter import Scan, ScanRow
 
@@ -36,7 +36,9 @@ RET20 = 20
 RET60 = 60
 SMA_N = 200
 
-Series = Sequence[tuple[str, float]]
+DateInput = date | datetime | str
+Series = Sequence[tuple[DateInput, float]]
+NormalizedSeries = Sequence[tuple[str, float]]
 
 
 class ScoreError(Exception):
@@ -48,13 +50,13 @@ def score_row(
     series: Series,
     benchmark: Series,
     *,
-    asof_date: date | str,
+    asof_date: DateInput,
 ) -> ScanRow:
     """One ticker against the benchmark series. Raises ``ScoreError`` to omit it."""
     if asof_date is None:
         raise TypeError("asof_date is required")
-    series_trimmed = trim_series(series, asof_date=asof_date)
-    bench_trimmed = trim_series(benchmark, asof_date=asof_date)
+    series_trimmed = _validated_series(series, before=asof_date)
+    bench_trimmed = _validated_series(benchmark, before=asof_date)
     asof = require_benchmark(bench_trimmed, asof_date=asof_date)
     trimmed = _aligned(series_trimmed, asof)
     bench = _aligned(bench_trimmed, asof)
@@ -88,29 +90,24 @@ def score_row(
     )
 
 
-def trim_series(series: Series, asof_date: date | str) -> tuple[tuple[str, float], ...]:
-    """Trim a series to completed sessions dated strictly before the run date."""
+def trim_series(series: Series, asof_date: DateInput) -> tuple[tuple[str, float], ...]:
+    """Validate and retain completed sessions dated strictly before the run date."""
     if asof_date is None:
         raise TypeError("asof_date is required")
-    target = (
-        date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
-    ).isoformat()
-    return tuple((day, close) for day, close in series if day < target)
+    return _validated_series(series, before=asof_date)
 
 
-def require_benchmark(series: Series, asof_date: date | str) -> str:
+def require_benchmark(series: Series, asof_date: DateInput) -> str:
     """Refuse a benchmark that cannot anchor relative strength. Returns its as-of date."""
     if asof_date is None:
         raise TypeError("asof_date is required")
-    if not series:
+    validated = _validated_series(series, before=asof_date)
+    if not validated:
         raise ScoreError("no sessions")
-    asof = series[-1][0]
-    trimmed = _aligned(series, asof)
-    _require_window(trimmed)
-    target = date.fromisoformat(asof_date) if isinstance(asof_date, str) else asof_date
+    asof = validated[-1][0]
+    _require_window(validated)
+    target = _calendar_date(asof_date, context="run date")
     bench_d = date.fromisoformat(asof)
-    if bench_d >= target:
-        raise ScoreError(f"benchmark session {asof} is not strictly before {target.isoformat()}")
     days = (target - bench_d).days
     if days > 7:
         raise ScoreError(
@@ -125,17 +122,18 @@ def scan_from_rows(benchmark: str, asof: str, rows: Sequence[ScanRow]) -> Scan:
     return Scan(benchmark=benchmark, asof=asof, rows=ordered)
 
 
-def _aligned(series: Series, asof: str) -> list[tuple[str, float]]:
+def _aligned(series: NormalizedSeries, asof: str) -> list[tuple[str, float]]:
     trimmed = [(day, close) for day, close in series if day <= asof]
     if not trimmed or trimmed[-1][0] != asof:
         raise ScoreError(f"no session on {asof}")
     return trimmed
 
 
-def _require_window(series: Sequence[tuple[str, float]]) -> None:
-    if len(series) < MIN_SESSIONS:
+def _require_window(series: Series) -> None:
+    validated = _validated_series(series)
+    if len(validated) < MIN_SESSIONS:
         raise ScoreError(f"fewer than {MIN_SESSIONS} sessions")
-    window = series[-MIN_SESSIONS:]
+    window = validated[-MIN_SESSIONS:]
     d_start = date.fromisoformat(window[0][0])
     d_end = date.fromisoformat(window[-1][0])
     span = (d_end - d_start).days
@@ -149,6 +147,43 @@ def _require_window(series: Sequence[tuple[str, float]]) -> None:
         raise ScoreError("non-positive close")
     if min(closes) == max(closes):
         raise ScoreError("constant closes")
+
+
+def _validated_series(
+    series: Series, *, before: DateInput | None = None
+) -> tuple[tuple[str, float], ...]:
+    """Normalize dates and enforce one strictly increasing session per calendar day."""
+    target = _calendar_date(before, context="run date") if before is not None else None
+    validated: list[tuple[str, float]] = []
+    previous: date | None = None
+    seen: set[date] = set()
+    for index, (raw_day, close) in enumerate(series):
+        current = _calendar_date(raw_day, context=f"series index {index}")
+        current_text = current.isoformat()
+        if current in seen:
+            raise ScoreError(f"series index {index} duplicates date {current_text}")
+        seen.add(current)
+        if previous is not None and current < previous:
+            raise ScoreError(
+                f"series index {index} date {current_text} is not after {previous.isoformat()}"
+            )
+        previous = current
+        if target is None or current < target:
+            validated.append((current_text, close))
+    return tuple(validated)
+
+
+def _calendar_date(value: DateInput, *, context: str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    raise ScoreError(f"{context} has invalid date {value!r}")
 
 
 def _return(closes: Sequence[float], sessions: int) -> float:
