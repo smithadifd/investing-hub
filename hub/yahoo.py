@@ -150,7 +150,10 @@ def parse_json(text: str) -> tuple[tuple[str, float], ...]:
             raise YahooError("null close")
         if not isinstance(close, (int, float)) or isinstance(close, bool):
             raise YahooError("non-numeric close")
-        close_float = float(close)
+        try:
+            close_float = float(close)
+        except (OverflowError, TypeError, ValueError):
+            raise YahooError("invalid close") from None
         if math.isnan(close_float) or math.isinf(close_float):
             raise YahooError("non-finite close")
         if close_float <= 0.0:
@@ -158,7 +161,10 @@ def parse_json(text: str) -> tuple[tuple[str, float], ...]:
 
         if not isinstance(ts, int) or isinstance(ts, bool):
             raise YahooError("invalid timestamp")
-        session_date = datetime.fromtimestamp(ts, UTC).date().isoformat()
+        try:
+            session_date = datetime.fromtimestamp(ts, UTC).date().isoformat()
+        except (OverflowError, OSError, ValueError, TypeError):
+            raise YahooError(f"invalid timestamp: {ts!r}") from None
         if session_date in seen_dates:
             raise YahooError(f"duplicate session date: {session_date}")
         seen_dates.add(session_date)

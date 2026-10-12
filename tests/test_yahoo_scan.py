@@ -118,6 +118,12 @@ def _json(closes: list[float], *, end: date = date(2026, 10, 8)) -> str:
     return json.dumps(payload)
 
 
+def _json_with_timestamp(timestamp: object) -> str:
+    payload = json.loads(_json([100.0]))
+    payload["chart"]["result"][0]["timestamp"] = [timestamp]
+    return json.dumps(payload)
+
+
 def _json_from_dated(series: Sequence[tuple[str, float]]) -> str:
     timestamps = [int(datetime.fromisoformat(f"{d}T13:30:00+00:00").timestamp()) for d, _ in series]
     closes = [close for _, close in series]
@@ -426,6 +432,38 @@ def test_parse_refuses_non_finite_close():
         yahoo.parse_json(json.dumps(payload_nan))
 
 
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        pytest.param(10**30, id="too-large"),
+        pytest.param(-(10**30), id="too-small"),
+        pytest.param("not-a-timestamp", id="non-numeric"),
+    ],
+)
+def test_parse_refuses_invalid_timestamp(timestamp):
+    try:
+        yahoo.parse_json(_json_with_timestamp(timestamp))
+    except yahoo.YahooError as exc:
+        if "invalid timestamp" not in str(exc):
+            pytest.fail(f"unexpected YahooError: {exc}")
+    except Exception as exc:
+        pytest.fail(f"parse_json leaked {type(exc).__name__}: {exc}")
+    else:
+        pytest.fail("parse_json accepted an invalid timestamp")
+
+
+def test_parse_translates_out_of_range_numeric_close():
+    try:
+        yahoo.parse_json(_json([10**1000]))
+    except yahoo.YahooError as exc:
+        if "invalid close" not in str(exc):
+            pytest.fail(f"unexpected YahooError: {exc}")
+    except Exception as exc:
+        pytest.fail(f"parse_json leaked {type(exc).__name__}: {exc}")
+    else:
+        pytest.fail("parse_json accepted an out-of-range close")
+
+
 def test_parse_refuses_non_positive_close():
     payload_zero = {
         "chart": {
@@ -701,6 +739,46 @@ def test_public_series_requires_strict_unique_dates(entry_point, fault, match):
             scan_score.require_benchmark(malformed, asof_date=date(2026, 10, 8))
 
 
+@pytest.mark.parametrize(
+    "entry_point",
+    ["score_row_ticker", "score_row_benchmark", "trim_series", "require_benchmark"],
+)
+@pytest.mark.parametrize(
+    ("invalid_close", "match"),
+    [
+        pytest.param(float("nan"), "non-finite close", id="nan"),
+        pytest.param(float("inf"), "non-finite close", id="positive-infinity"),
+        pytest.param(float("-inf"), "non-finite close", id="negative-infinity"),
+        pytest.param(True, "non-real close", id="boolean"),
+        pytest.param("100.0", "non-real close", id="non-numeric"),
+    ],
+)
+def test_public_series_rejects_invalid_closes(entry_point, invalid_close, match):
+    malformed = list(_dated(_flat(100.0, 252, last=110.0), end=date(2026, 10, 7)))
+    malformed[-1] = (malformed[-1][0], invalid_close)
+    malformed = tuple(malformed)
+    valid = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    expected = rf"series index 251 date 2026-10-07 has {match}"
+    with pytest.raises(scan_score.ScoreError, match=expected):
+        if entry_point == "score_row_ticker":
+            scan_score.score_row("XLK", malformed, valid, asof_date=date(2026, 10, 8))
+        elif entry_point == "score_row_benchmark":
+            scan_score.score_row("XLK", valid, malformed, asof_date=date(2026, 10, 8))
+        elif entry_point == "trim_series":
+            scan_score.trim_series(malformed, asof_date=date(2026, 10, 8))
+        else:
+            scan_score.require_benchmark(malformed, asof_date=date(2026, 10, 8))
+
+
+def test_score_row_refuses_a_non_finite_computed_metric():
+    closes = _flat(100.0, 252, last=float.fromhex("0x1.fffffffffffffp+1023"))
+    closes[-21] = float.fromhex("0x0.0000000000001p-1022")
+    ticker = _dated(closes, end=date(2026, 10, 7))
+    benchmark = _dated(_flat(100.0, 252, last=104.0), end=date(2026, 10, 7))
+    with pytest.raises(scan_score.ScoreError, match="non-finite metric ret20"):
+        scan_score.score_row("XLK", ticker, benchmark, asof_date=date(2026, 10, 8))
+
+
 def test_require_window_counts_only_validated_unique_sessions():
     with pytest.raises(scan_score.ScoreError, match="series index 100 duplicates date"):
         scan_score._require_window(_malformed_series("duplicate"))
@@ -743,6 +821,30 @@ def test_build_scan_omits_a_bad_ticker_and_keeps_a_good_one():
     )
     assert [row.ticker for row in scan.rows] == ["XLK"]
     assert any("QQQ" in note for note in notes)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        pytest.param(10**30, id="too-large"),
+        pytest.param(-(10**30), id="too-small"),
+        pytest.param("not-a-timestamp", id="non-numeric"),
+    ],
+)
+def test_build_scan_omits_invalid_timestamp_and_scores_other_tickers(timestamp):
+    fetch = _fixture_fetcher({"bad": _json_with_timestamp(timestamp)})
+    try:
+        scan, notes = yahoo.build_scan(
+            ["BAD", "XLK"], "SPY", fetcher=fetch, asof_date=date(2026, 10, 8)
+        )
+    except Exception as exc:
+        pytest.fail(f"build_scan leaked {type(exc).__name__}: {exc}")
+    if [row.ticker for row in scan.rows] != ["XLK"]:
+        pytest.fail(f"unexpected scored tickers: {[row.ticker for row in scan.rows]}")
+    if len(notes) != 1:
+        pytest.fail(f"unexpected omission notes: {notes!r}")
+    if "BAD: invalid timestamp" not in notes[0]:
+        pytest.fail(f"missing invalid-timestamp note: {notes[0]}")
 
 
 def test_build_scan_refuses_a_stubbed_benchmark():

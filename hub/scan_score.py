@@ -22,8 +22,10 @@ Definitions, all on sessions aligned to the benchmark's latest date:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from datetime import date, datetime
+from numbers import Real
 
 from hub.letter import Scan, ScanRow
 
@@ -67,12 +69,12 @@ def score_row(
     close = closes[-1]
     low, high = min(closes[-MIN_SESSIONS:]), max(closes[-MIN_SESSIONS:])
     # high == low is already refused by _require_window.
-    pct52w = (close - low) / (high - low) * 100.0
-    ret20 = _return(closes, RET20)
-    ret60 = _return(closes, RET60)
-    rs20 = ret20 - _return(bench_closes, RET20)
-    rs60 = ret60 - _return(bench_closes, RET60)
-    sma200 = sum(closes[-SMA_N:]) / SMA_N
+    pct52w = _finite_metric("pct52w", (close - low) / (high - low) * 100.0)
+    ret20 = _finite_metric("ret20", _return(closes, RET20))
+    ret60 = _finite_metric("ret60", _return(closes, RET60))
+    rs20 = _finite_metric("rs20", ret20 - _return(bench_closes, RET20))
+    rs60 = _finite_metric("rs60", ret60 - _return(bench_closes, RET60))
+    sma200 = _finite_metric("sma200", sum(closes[-SMA_N:]) / SMA_N)
     trend = _trend(close, sma200)
     crossed = _crossed(closes)
     return ScanRow(
@@ -160,6 +162,20 @@ def _validated_series(
     for index, (raw_day, close) in enumerate(series):
         current = _calendar_date(raw_day, context=f"series index {index}")
         current_text = current.isoformat()
+        if isinstance(close, bool) or not isinstance(close, Real):
+            raise ScoreError(
+                f"series index {index} date {current_text} has non-real close {close!r}"
+            )
+        try:
+            close_value = float(close)
+        except (OverflowError, TypeError, ValueError):
+            raise ScoreError(
+                f"series index {index} date {current_text} has non-real close {close!r}"
+            ) from None
+        if not math.isfinite(close_value):
+            raise ScoreError(
+                f"series index {index} date {current_text} has non-finite close {close!r}"
+            )
         if current in seen:
             raise ScoreError(f"series index {index} duplicates date {current_text}")
         seen.add(current)
@@ -169,7 +185,7 @@ def _validated_series(
             )
         previous = current
         if target is None or current < target:
-            validated.append((current_text, close))
+            validated.append((current_text, close_value))
     return tuple(validated)
 
 
@@ -194,6 +210,12 @@ def _return(closes: Sequence[float], sessions: int) -> float:
     return (close / earlier - 1.0) * 100.0
 
 
+def _finite_metric(name: str, value: float) -> float:
+    if not math.isfinite(value):
+        raise ScoreError(f"non-finite metric {name}")
+    return value
+
+
 def _trend(close: float, sma200: float) -> str:
     if close > sma200:
         return "above"
@@ -205,8 +227,8 @@ def _trend(close: float, sma200: float) -> str:
 def _crossed(closes: Sequence[float]) -> str | None:
     close = closes[-1]
     prev_close = closes[-2]
-    sma_today = sum(closes[-SMA_N:]) / SMA_N
-    sma_prev = sum(closes[-SMA_N - 1 : -1]) / SMA_N
+    sma_today = _finite_metric("sma200", sum(closes[-SMA_N:]) / SMA_N)
+    sma_prev = _finite_metric("prior sma200", sum(closes[-SMA_N - 1 : -1]) / SMA_N)
     if prev_close <= sma_prev and close > sma_today:
         return "up"
     if prev_close >= sma_prev and close < sma_today:
