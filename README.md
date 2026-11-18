@@ -10,6 +10,8 @@ files and is never committed. See [ROADMAP.md](ROADMAP.md) for the architecture 
 
 **Status:** early. Every `hub` subcommand in the first milestone is implemented: the store and its backups, the claude.ai import, the IC pack client and the session-open status block.
 
+Released continuously from `main`; there are no versioned releases.
+
 ## Quick start
 
 ```bash

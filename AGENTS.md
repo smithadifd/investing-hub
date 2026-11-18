@@ -5,6 +5,8 @@ Canonical, tool-agnostic and self-contained. `CLAUDE.md` imports this file; don'
 Backup posture: nightly `hub db backup` (the online `sqlite3` `.backup` API, integrity-checked, 7-day retention: the newest copy of each of the last 7 backup days, plus every copy from the newest day) of `data/hub.db` into `backups/`, plus the Time Machine layer that picks up `backups/`; GitHub holds only code, never data. The nightly schedule lives on the always-on Mac, outside this repo.
 Restore procedure: run `hub db restore-check [backups/<file>]` (defaults to the newest backup; integrity, table list, row counts and newest revision against `data/hub.db`; exit 0 is PASS, a lagging backup is WARN, never a failure). To restore, stop anything using the store, copy the backup over `data/hub.db` and remove `data/hub.db-wal` and `data/hub.db-shm`.
 
+Release class: continuous
+
 ## What Investing Hub is
 
 The advisor and attention layer that pairs with Investing Companion (IC). IC owns live market
